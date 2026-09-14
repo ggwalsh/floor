@@ -6,6 +6,8 @@ import {
   along,
   clampDoor,
   formatDim,
+  handleCursor,
+  handleHitRadius,
   hitHandle,
   hitOpening,
   hitRoom,
@@ -186,7 +188,10 @@ export function FloorCanvas() {
       const s = live.current;
       if (s.tool === "erase") return "pointer";
       const sel = s.pieces.find((x) => x.id === s.selected);
-      if (sel && hitHandle(sel, p.x, p.y, 12)) return "nwse-resize";
+      if (sel) {
+        const handle = hitHandle(sel, p.x, p.y, handleHitRadius(sel, 1 / (PPI * zoom.current)));
+        if (handle) return handleCursor(sel, handle);
+      }
       if (hitTopPiece(s.pieces, p.x, p.y)) return "grab";
       const opening = hitOpening(s.openings, s.walls, p.x, p.y);
       hover.current = opening;
@@ -201,7 +206,7 @@ export function FloorCanvas() {
       const s = live.current;
       const sel = s.pieces.find((x) => x.id === s.selected);
       if (sel) {
-        const handle = hitHandle(sel, p.x, p.y, 12);
+        const handle = hitHandle(sel, p.x, p.y, handleHitRadius(sel, 1 / (PPI * zoom.current)));
         if (handle) {
           s.select(sel.id);
           s.checkpoint();
@@ -662,11 +667,11 @@ function drawRoom(ctx: CanvasRenderingContext2D, room: RoomLabel, s: number, on:
 }
 
 function drawHandles(ctx: CanvasRenderingContext2D, piece: Piece, s: number) {
-  const size = Math.max(7, 6 * Math.min(s / 1.7, 1.6));
   ctx.fillStyle = "#eceaea";
   ctx.strokeStyle = "#b32440";
   ctx.lineWidth = 1.5;
   for (const h of pieceHandles(piece)) {
+    const size = h.corner ? Math.max(8, 7 * Math.min(s / 1.7, 1.6)) : Math.max(5, 4.5 * Math.min(s / 1.7, 1.6));
     ctx.beginPath();
     ctx.rect(h.x * s - size / 2, h.y * s - size / 2, size, size);
     ctx.fill();

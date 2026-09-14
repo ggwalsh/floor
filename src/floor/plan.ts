@@ -556,7 +556,13 @@ export function hitRoom(rooms: RoomLabel[], x: number, y: number) {
   return best;
 }
 
-export type EdgeHandle = "e" | "w" | "n" | "s";
+export type EdgeHandle = "e" | "w" | "n" | "s" | "ne" | "nw" | "se" | "sw";
+
+export function handleHitRadius(piece: Piece, worldPerPixel = 1 / 1.7) {
+  const fromPx = 12 * worldPerPixel;
+  const cap = Math.min(piece.w, piece.h) * 0.3;
+  return Math.min(fromPx, cap, 5.5);
+}
 
 export function pieceHandles(piece: Piece) {
   const hw = piece.w / 2;
@@ -565,6 +571,10 @@ export function pieceHandles(piece: Piece) {
   const c = Math.cos(rad);
   const s = Math.sin(rad);
   const locals: { id: EdgeHandle; lx: number; ly: number }[] = [
+    { id: "ne", lx: hw, ly: -hh },
+    { id: "nw", lx: -hw, ly: -hh },
+    { id: "se", lx: hw, ly: hh },
+    { id: "sw", lx: -hw, ly: hh },
     { id: "e", lx: hw, ly: 0 },
     { id: "w", lx: -hw, ly: 0 },
     { id: "n", lx: 0, ly: -hh },
@@ -574,12 +584,24 @@ export function pieceHandles(piece: Piece) {
     id: h.id,
     x: piece.x + h.lx * c - h.ly * s,
     y: piece.y + h.lx * s + h.ly * c,
+    corner: h.id.length === 2,
   }));
 }
 
-export function hitHandle(piece: Piece, x: number, y: number, max = 10) {
+export function handleCursor(piece: Piece, handle: EdgeHandle): string {
+  const h = pieceHandles(piece).find((x) => x.id === handle);
+  if (!h) return "nwse-resize";
+  const dx = h.x - piece.x;
+  const dy = h.y - piece.y;
+  if (Math.abs(dx) < 1e-6) return "ns-resize";
+  if (Math.abs(dy) < 1e-6) return "ew-resize";
+  return dx * dy > 0 ? "nwse-resize" : "nesw-resize";
+}
+
+export function hitHandle(piece: Piece, x: number, y: number, max?: number) {
+  const dmax = max ?? handleHitRadius(piece);
   let best: EdgeHandle | null = null;
-  let dmin = max;
+  let dmin = dmax;
   for (const h of pieceHandles(piece)) {
     const d = Math.hypot(h.x - x, h.y - y);
     if (d < dmin) {
@@ -604,18 +626,19 @@ export function resizeFromHandle(
   let h = piece.h;
   let lx = 0;
   let ly = 0;
-  if (handle === "e") {
+  if (handle === "e" || handle === "ne" || handle === "se") {
     w = clampDim(local.x + piece.w / 2, 6, 600);
     lx = (w - piece.w) / 2;
-  } else if (handle === "w") {
+  } else if (handle === "w" || handle === "nw" || handle === "sw") {
     w = clampDim(piece.w / 2 - local.x, 6, 600);
     lx = (piece.w - w) / 2;
-  } else if (handle === "s") {
+  }
+  if (handle === "s" || handle === "se" || handle === "sw") {
     h = clampDim(local.y + piece.h / 2, 6, 600);
     ly = (h - piece.h) / 2;
-  } else {
+  } else if (handle === "n" || handle === "ne" || handle === "nw") {
     h = clampDim(piece.h / 2 - local.y, 6, 600);
-    ly = (h - piece.h) / 2;
+    ly = (piece.h - h) / 2;
   }
   return {
     w,

@@ -12,6 +12,9 @@ import {
   clearanceLabels,
   formatDim,
   fmtIn,
+  handleCursor,
+  handleHitRadius,
+  hitHandle,
   hitOpening,
   hitPiece,
   isAlongWall,
@@ -23,6 +26,7 @@ import {
   parseDim,
   parsePlan,
   pieceFromBuiltin,
+  resizeFromHandle,
   rotate90,
   serializePlan,
   setOpeningClearance,
@@ -377,4 +381,48 @@ test("hitOpening finds a window on the north wall", () => {
   const west = hitOpening(SAMPLE_OPENINGS, SAMPLE_WALLS, 40, 0);
   assert.ok(west);
   assert.equal(west.part, "before");
+});
+
+test("nightstand middle is move, not resize", () => {
+  const ns: Piece = {
+    id: "ns",
+    kind: "furniture",
+    shape: "rect",
+    label: "Nightstand",
+    x: 0,
+    y: 0,
+    w: 20,
+    h: 18,
+    rot: 0,
+  };
+  const r = handleHitRadius(ns);
+  assert.ok(r < 9, `radius ${r} reaches the center of an 18" piece`);
+  assert.equal(hitHandle(ns, 0, 0, r), null);
+  assert.equal(hitHandle(ns, 2, 1, r), null);
+  assert.equal(hitHandle(ns, 10, 0, r), "e");
+  assert.equal(hitHandle(ns, 0, -9, r), "n");
+  assert.equal(hitHandle(ns, 10, -9, r), "ne");
+  assert.equal(handleCursor(ns, "e"), "ew-resize");
+  assert.equal(handleCursor(ns, "n"), "ns-resize");
+  assert.equal(handleCursor(ns, "ne"), "nesw-resize");
+  assert.equal(handleCursor(ns, "se"), "nwse-resize");
+});
+
+test("resize from a corner keeps the opposite corner", () => {
+  const p: Piece = {
+    id: "x",
+    kind: "furniture",
+    shape: "rect",
+    label: "Box",
+    x: 50,
+    y: 50,
+    w: 20,
+    h: 20,
+    rot: 0,
+  };
+  const se = resizeFromHandle(p, "se", 70, 70);
+  assert.equal(se.w, 30);
+  assert.equal(se.h, 30);
+  assert.equal(se.x, 55);
+  assert.equal(se.y, 55);
 });
