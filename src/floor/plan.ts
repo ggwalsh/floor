@@ -1,10 +1,15 @@
 export const SNAP = 6;
 export const WALL_THICK = 4;
 export const IN_PER_M = 39.37007874015748;
+export const SNAP_PULL = 8;
+export const WALL_PULL = 18;
+export const FLUSH_PULL = 14;
+export const ALIGN_PULL = 8;
 
 export type Tool = "select" | "wall" | "door" | "window" | "room" | "erase" | "furniture";
 export type Unit = "imperial" | "metric";
 export type WallKeep = "start" | "end";
+export type OpeningPart = "body" | "before" | "after";
 
 export type WallSeg = {
   id: string;
@@ -261,6 +266,13 @@ export function wallAngle(wall: WallSeg) {
   return (Math.atan2(wall.y2 - wall.y1, wall.x2 - wall.x1) * 180) / Math.PI;
 }
 
+export function wallAxes(wall: WallSeg) {
+  const L = lengthIn(wall) || 1;
+  const ux = (wall.x2 - wall.x1) / L;
+  const uy = (wall.y2 - wall.y1) / L;
+  return { ux, uy, nx: -uy, ny: ux, L };
+}
+
 export function hitWall(walls: WallSeg[], x: number, y: number, max = 10) {
   let best: WallSeg | null = null;
   let dmin = max;
@@ -282,6 +294,218 @@ export function clampDoor(wall: WallSeg, offset: number, width: number) {
   const w = Math.min(width, Math.max(18, L - 6));
   const off = Math.max(3, Math.min(L - w - 3, offset - w / 2));
   return { offset: off, width: w };
+}
+
+export type OpeningHit = {
+  opening: Opening;
+  part: OpeningPart;
+};
+
+function distToSeg(x: number, y: number, ax: number, ay: number, bx: number, by: number) {
+  const dx = bx - ax;
+  const dy = by - ay;
+  const l2 = dx * dx + dy * dy || 1;
+  const t = Math.max(0, Math.min(1, ((x - ax) * dx + (y - ay) * dy) / l2));
+  return Math.hypot(x - (ax + dx * t), y - (ay + dy * t));
+}
+
+export function openingFrame(wall: WallSeg, o: Opening) {
+  const { ux, uy, nx, ny } = wallAxes(wall);
+  const a = along(wall, o.offset);
+  const b = along(wall, o.offset + o.width);
+  const hinge = o.hinge === "start" ? a : b;
+  const closed = o.hinge === "start" ? { x: ux, y: uy } : { x: -ux, y: -uy };
+  const open = { x: nx * o.side, y: ny * o.side };
+  const leaf = { x: hinge.x + open.x * o.width, y: hinge.y + open.y * o.width };
+  const sweep = (Math.PI / 2) * o.side * (o.hinge === "start" ? 1 : -1);
+  return { a, b, hinge, closed, open, leaf, ux, uy, nx, ny, sweep };
+}
+
+function hitDoorSwing(wall: WallSeg, o: Opening, x: number, y: number) {
+  const f = openingFrame(wall, o);
+  const dx = x - f.hinge.x;
+  const dy = y - f.hinge.y;
+  const r = Math.hypot(dx, dy);
+  if (r <= o.width + 6) {
+    const ang = Math.atan2(f.closed.x * dy - f.closed.y * dx, f.closed.x * dx + f.closed.y * dy);
+    const lo = f.sweep < 0 ? f.sweep - 0.2 : -0.2;
+    const hi = f.sweep < 0 ? 0.2 : f.sweep + 0.2;
+    if (ang >= lo && ang <= hi) return true;
+  }
+  return distToSeg(x, y, f.hinge.x, f.hinge.y, f.leaf.x, f.leaf.y) <= 10;
+}
+
+export function hitOpening(openings: Opening[], walls: WallSeg[], x: number, y: number): OpeningHit | null {
+  const stub = 36;
+  let best: OpeningHit | null = null;
+  let bestScore = 20;
+  for (const o of openings) {
+    const wall = walls.find((w) => w.id === o.wallId);
+    if (!wall) continue;
+    const t = projectT(wall, x, y);
+    const L = lengthIn(wall) || 1;
+    const clampedT = Math.max(0, Math.min(L, t));
+    const p = along(wall, clampedT);
+    const dWall = Math.hypot(p.x - x, p.y - y);
+    const onBody = t >= o.offset - 6 && t <= o.offset + o.width + 6 && dWall < 16;
+    const swing = o.kind === "door" && hitDoorSwing(wall, o, x, y);
+    if (onBody || swing) {
+      const score = swing ? Math.min(dWall, 8) : dWall;
+      if (score < bestScore) {
+        bestScore = score;
+        best = { opening: o, part: "body" };
+      }
+      continue;
+    }
+    const onBefore = t >= o.offset - stub && t < o.offset && dWall < 12;
+    const onAfter = t > o.offset + o.width && t <= o.offset + o.width + stub && dWall < 12;
+    if (onBefore && dWall < bestScore) {
+      bestScore = dWall;
+      best = { opening: o, part: "before" };
+    } else if (onAfter && dWall < bestScore) {
+      bestScore = dWall;
+      best = { opening: o, part: "after" };
+    }
+  }
+  return best;
+}
+
+export function openingClearance(wall: WallSeg, o: Opening) {
+  const L = lengthIn(wall) || 1;
+  return {
+    before: o.offset,
+    after: Math.max(0, L - o.offset - o.width),
+    length: L,
+  };
+}
+
+export function clearanceLabels(wall: WallSeg): { before: string; after: string } {
+  const horiz = Math.abs(wall.x2 - wall.x1) >= Math.abs(wall.y2 - wall.y1);
+  if (horiz) {
+    if (wall.x2 >= wall.x1) return { before: "West of", after: "East of" };
+    return { before: "East of", after: "West of" };
+  }
+  if (wall.y2 >= wall.y1) return { before: "North of", after: "South of" };
+  return { before: "South of", after: "North of" };
+}
+
+export function setOpeningClearance(
+  wall: WallSeg,
+  o: Opening,
+  side: "before" | "after",
+  inches: number,
+): Opening {
+  const L = lengthIn(wall);
+  const w = Math.min(o.width, Math.max(18, L - 1));
+  const gap = clampDim(inches, 0, L - w);
+  const offset = side === "before" ? gap : L - w - gap;
+  return { ...o, offset: Math.max(0, Math.min(L - w, offset)), width: w };
+}
+
+type SnapCand = { center: number; dist: number; rank: number };
+
+function spansOverlap(a1: number, a2: number, b1: number, b2: number, pad: number) {
+  return a1 <= b2 + pad && a2 >= b1 - pad;
+}
+
+function pickSnap(cands: SnapCand[]): number | null {
+  if (!cands.length) return null;
+  let best = cands[0];
+  for (let i = 1; i < cands.length; i++) {
+    const c = cands[i];
+    if (c.dist < best.dist - 0.01 || (Math.abs(c.dist - best.dist) <= 0.01 && c.rank < best.rank)) {
+      best = c;
+    }
+  }
+  return best.center;
+}
+
+function pushCand(list: SnapCand[], center: number, dist: number, rank: number, limit: number) {
+  if (dist <= limit) list.push({ center, dist, rank });
+}
+
+export function snapPiecePosition(
+  piece: Piece,
+  x: number,
+  y: number,
+  walls: WallSeg[],
+  others: Piece[],
+): { x: number; y: number } {
+  const box = aabb({ ...piece, x, y });
+  const half = WALL_THICK / 2;
+  const xs: SnapCand[] = [];
+  const ys: SnapCand[] = [];
+
+  for (const w of walls) {
+    const horiz = Math.abs(w.x2 - w.x1) >= Math.abs(w.y2 - w.y1);
+    if (horiz) {
+      const y0 = w.y1;
+      const minX = Math.min(w.x1, w.x2);
+      const maxX = Math.max(w.x1, w.x2);
+      if (!spansOverlap(box.x1, box.x2, minX, maxX, 24)) continue;
+      const inner = y >= y0 ? y0 + half : y0 - half;
+      const inSlab = (edge: number) => edge >= y0 - half - 1 && edge <= y0 + half + 1;
+      const dLow = Math.abs(box.y1 - inner);
+      const dHigh = Math.abs(box.y2 - inner);
+      pushCand(ys, y + (inner - box.y1), inSlab(box.y1) ? 0 : dLow, 0, WALL_PULL);
+      pushCand(ys, y + (inner - box.y2), inSlab(box.y2) ? 0 : dHigh, 0, WALL_PULL);
+    } else {
+      const x0 = w.x1;
+      const minY = Math.min(w.y1, w.y2);
+      const maxY = Math.max(w.y1, w.y2);
+      if (!spansOverlap(box.y1, box.y2, minY, maxY, 24)) continue;
+      const inner = x >= x0 ? x0 + half : x0 - half;
+      const inSlab = (edge: number) => edge >= x0 - half - 1 && edge <= x0 + half + 1;
+      const dLow = Math.abs(box.x1 - inner);
+      const dHigh = Math.abs(box.x2 - inner);
+      pushCand(xs, x + (inner - box.x1), inSlab(box.x1) ? 0 : dLow, 0, WALL_PULL);
+      pushCand(xs, x + (inner - box.x2), inSlab(box.x2) ? 0 : dHigh, 0, WALL_PULL);
+    }
+  }
+
+  for (const p of others) {
+    if (p.id === piece.id) continue;
+    const b = aabb(p);
+    if (spansOverlap(box.y1, box.y2, b.y1, b.y2, 12)) {
+      pushCand(xs, x + (b.x2 - box.x1), Math.abs(box.x1 - b.x2), 1, FLUSH_PULL);
+      pushCand(xs, x + (b.x1 - box.x2), Math.abs(box.x2 - b.x1), 1, FLUSH_PULL);
+      pushCand(xs, x + (b.x1 - box.x1), Math.abs(box.x1 - b.x1), 2, ALIGN_PULL);
+      pushCand(xs, x + (b.x2 - box.x2), Math.abs(box.x2 - b.x2), 2, ALIGN_PULL);
+    }
+    if (spansOverlap(box.x1, box.x2, b.x1, b.x2, 12)) {
+      pushCand(ys, y + (b.y2 - box.y1), Math.abs(box.y1 - b.y2), 1, FLUSH_PULL);
+      pushCand(ys, y + (b.y1 - box.y2), Math.abs(box.y2 - b.y1), 1, FLUSH_PULL);
+      pushCand(ys, y + (b.y1 - box.y1), Math.abs(box.y1 - b.y1), 2, ALIGN_PULL);
+      pushCand(ys, y + (b.y2 - box.y2), Math.abs(box.y2 - b.y2), 2, ALIGN_PULL);
+    }
+  }
+
+  let nx = pickSnap(xs) ?? snap(x);
+  let ny = pickSnap(ys) ?? snap(y);
+
+  const placed = aabb({ ...piece, x: nx, y: ny });
+  for (const p of others) {
+    if (p.id === piece.id) continue;
+    const b = aabb(p);
+    if (!aabbsOverlap(placed, b)) continue;
+    const options = [
+      { axis: "x" as const, d: b.x2 - placed.x1 },
+      { axis: "x" as const, d: b.x1 - placed.x2 },
+      { axis: "y" as const, d: b.y2 - placed.y1 },
+      { axis: "y" as const, d: b.y1 - placed.y2 },
+    ].sort((a, c) => Math.abs(a.d) - Math.abs(c.d));
+    const pick = options[0];
+    if (Math.abs(pick.d) > FLUSH_PULL || Math.abs(pick.d) < 0.05) continue;
+    if (pick.axis === "x") nx += pick.d;
+    else ny += pick.d;
+    const next = aabb({ ...piece, x: nx, y: ny });
+    placed.x1 = next.x1;
+    placed.y1 = next.y1;
+    placed.x2 = next.x2;
+    placed.y2 = next.y2;
+  }
+
+  return { x: nx, y: ny };
 }
 
 export function localPoint(piece: Piece, x: number, y: number) {
@@ -391,7 +615,7 @@ export function resizeFromHandle(
     ly = (h - piece.h) / 2;
   } else {
     h = clampDim(piece.h / 2 - local.y, 6, 600);
-    ly = (piece.h - h) / 2;
+    ly = (h - piece.h) / 2;
   }
   return {
     w,

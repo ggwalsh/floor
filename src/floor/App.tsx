@@ -1,4 +1,4 @@
-import { type ReactNode, useEffect, useId, useState } from "react";
+import { type ReactNode, useEffect, useId, useRef, useState } from "react";
 import type { OnBrand } from "../shared/brand";
 import { cn } from "../shared/cn";
 import { FloorCanvas } from "./canvas";
@@ -6,11 +6,13 @@ import {
   CATALOG,
   ROOM_PRESETS,
   clampDim,
+  clearanceLabels,
   formatDim,
   formatDimAlt,
   isAlongWall,
   isCustomItem,
   lengthIn,
+  openingClearance,
   parseDim,
   parsePlan,
   rotate90,
@@ -61,6 +63,8 @@ function DimInput({
   label,
   min = 1,
   max = 2400,
+  accent = false,
+  autoFocus = false,
 }: {
   inches: number;
   onCommit: (inches: number) => void;
@@ -68,18 +72,37 @@ function DimInput({
   label: string;
   min?: number;
   max?: number;
+  accent?: boolean;
+  autoFocus?: boolean;
 }) {
   const id = useId();
+  const ref = useRef<HTMLInputElement>(null);
   const [draft, setDraft] = useState<string | null>(null);
   const shown = draft ?? formatDim(inches, unit);
   const live = draft != null ? parseDim(draft, unit) : null;
+
+  useEffect(() => {
+    setDraft(null);
+  }, [inches]);
+
+  useEffect(() => {
+    if (!autoFocus) return;
+    const el = ref.current;
+    if (!el) return;
+    el.focus();
+    el.select();
+  }, [autoFocus, label]);
 
   return (
     <label className="flex flex-col gap-1 text-xs text-muted" htmlFor={id}>
       {label}
       <input
+        ref={ref}
         id={id}
-        className="min-h-11 rounded-sm border border-line bg-ink px-3 text-sm text-fg tabular-nums"
+        className={cn(
+          "min-h-11 rounded-sm border bg-ink px-3 text-sm text-fg tabular-nums",
+          accent ? "border-amaranth" : "border-line",
+        )}
         value={shown}
         placeholder={unit === "imperial" ? `5' 2"` : "157 cm"}
         aria-label={label}
@@ -118,6 +141,7 @@ export function FloorApp({ onBrand, homeHref = "./" }: { onBrand?: OnBrand; home
   const catalogId = useFloor((s) => s.catalogId);
   const roomName = useFloor((s) => s.roomName);
   const selected = useFloor((s) => s.selected);
+  const openingFocus = useFloor((s) => s.openingFocus);
   const unit = useFloor((s) => s.unit);
   const wallKeep = useFloor((s) => s.wallKeep);
   const setTool = useFloor((s) => s.setTool);
@@ -129,6 +153,7 @@ export function FloorApp({ onBrand, homeHref = "./" }: { onBrand?: OnBrand; home
   const updatePiece = useFloor((s) => s.updatePiece);
   const updateOpening = useFloor((s) => s.updateOpening);
   const updateOpeningWidth = useFloor((s) => s.updateOpeningWidth);
+  const updateOpeningClearance = useFloor((s) => s.updateOpeningClearance);
   const updateRoom = useFloor((s) => s.updateRoom);
   const updateWallLength = useFloor((s) => s.updateWallLength);
   const remove = useFloor((s) => s.remove);
@@ -147,6 +172,9 @@ export function FloorApp({ onBrand, homeHref = "./" }: { onBrand?: OnBrand; home
   const opening = openings.find((o) => o.id === selected) ?? null;
   const room = rooms.find((r) => r.id === selected) ?? null;
   const wall = walls.find((w) => w.id === selected) ?? null;
+  const hostWall = opening ? (walls.find((w) => w.id === opening.wallId) ?? null) : wall;
+  const openingClr = opening && hostWall ? openingClearance(hostWall, opening) : null;
+  const openingLabels = hostWall && opening ? clearanceLabels(hostWall) : null;
 
   useEffect(() => {
     setBrand("think");
@@ -326,8 +354,8 @@ export function FloorApp({ onBrand, homeHref = "./" }: { onBrand?: OnBrand; home
 
       {tool === "select" ? (
         <p className="mt-3 text-xs text-muted">
-          Click a piece or a wall. Size fields appear under the plan — 192 in, 16 ft, 5' 2", or
-          157 cm.
+          Click a door or window — it highlights. Drag it along the wall to park it, then click the
+          stub of wall on either side and type the exact clearance.
         </p>
       ) : null}
 
@@ -389,7 +417,7 @@ export function FloorApp({ onBrand, homeHref = "./" }: { onBrand?: OnBrand; home
                   </Chip>
                 </div>
               </div>
-            ) : opening ? (
+            ) : opening && openingClr && openingLabels ? (
               <div className="flex flex-wrap items-start gap-3">
                 <p className="w-full font-mono text-xs tracking-widest text-accent uppercase sm:w-auto sm:pt-6">
                   {opening.kind}
@@ -401,7 +429,30 @@ export function FloorApp({ onBrand, homeHref = "./" }: { onBrand?: OnBrand; home
                   unit={unit}
                   min={18}
                   max={96}
+                  accent={openingFocus === "body"}
                   onCommit={(n) => updateOpeningWidth(opening.id, n)}
+                />
+                <DimInput
+                  key={`${opening.id}-before`}
+                  label={openingLabels.before}
+                  inches={openingClr.before}
+                  unit={unit}
+                  min={0}
+                  max={2400}
+                  accent={openingFocus === "before"}
+                  autoFocus={openingFocus === "before"}
+                  onCommit={(n) => updateOpeningClearance(opening.id, "before", n)}
+                />
+                <DimInput
+                  key={`${opening.id}-after`}
+                  label={openingLabels.after}
+                  inches={openingClr.after}
+                  unit={unit}
+                  min={0}
+                  max={2400}
+                  accent={openingFocus === "after"}
+                  autoFocus={openingFocus === "after"}
+                  onCommit={(n) => updateOpeningClearance(opening.id, "after", n)}
                 />
               </div>
             ) : (
@@ -411,8 +462,8 @@ export function FloorApp({ onBrand, homeHref = "./" }: { onBrand?: OnBrand; home
               </p>
             )}
             <p className="mt-2 font-mono text-xs text-muted">
-              Select, then type a dimension or drag the handles. Wall is click-drag. Empty click
-              pans. Scroll zooms. Grid is 1'.
+              Select, then type a dimension or drag. Doors and windows slide along the wall.
+              Click a stub to type its length. Empty click pans. Scroll zooms. Grid is 1'.
             </p>
           </div>
         </div>
@@ -505,7 +556,7 @@ export function FloorApp({ onBrand, homeHref = "./" }: { onBrand?: OnBrand; home
                   Remove
                 </button>
               </div>
-            ) : opening ? (
+            ) : opening && openingClr && openingLabels ? (
               <div className="mt-3 space-y-3">
                 <DimInput
                   key={`${opening.id}-side-w`}
@@ -514,8 +565,35 @@ export function FloorApp({ onBrand, homeHref = "./" }: { onBrand?: OnBrand; home
                   unit={unit}
                   min={18}
                   max={96}
+                  accent={openingFocus === "body"}
                   onCommit={(n) => updateOpeningWidth(opening.id, n)}
                 />
+                <div className="grid grid-cols-2 gap-2">
+                  <DimInput
+                    key={`${opening.id}-side-before`}
+                    label={openingLabels.before}
+                    inches={openingClr.before}
+                    unit={unit}
+                    min={0}
+                    max={2400}
+                    accent={openingFocus === "before"}
+                    onCommit={(n) => updateOpeningClearance(opening.id, "before", n)}
+                  />
+                  <DimInput
+                    key={`${opening.id}-side-after`}
+                    label={openingLabels.after}
+                    inches={openingClr.after}
+                    unit={unit}
+                    min={0}
+                    max={2400}
+                    accent={openingFocus === "after"}
+                    onCommit={(n) => updateOpeningClearance(opening.id, "after", n)}
+                  />
+                </div>
+                <p className="text-xs text-muted">
+                  Drag the door along the wall. Click the short wall on either side and type the
+                  clearance — 3 ft, 36 in, or 90 cm.
+                </p>
                 {opening.kind === "door" ? (
                   <div className="flex flex-wrap gap-2">
                     <Chip

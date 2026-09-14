@@ -9,23 +9,28 @@ import {
   aabb,
   aabbsOverlap,
   clampDoor,
+  clearanceLabels,
   formatDim,
   fmtIn,
+  hitOpening,
   hitPiece,
   isAlongWall,
   isCustomItem,
   lengthIn,
   localPoint,
+  openingClearance,
   overlappingIds,
   parseDim,
   parsePlan,
   pieceFromBuiltin,
   rotate90,
   serializePlan,
+  setOpeningClearance,
   setWallLength,
   sideOf,
   slideJoint,
   snap,
+  snapPiecePosition,
   wallCaption,
   type Piece,
   type WallSeg,
@@ -239,6 +244,68 @@ test("wallCaption names the envelope", () => {
   assert.equal(wallCaption(hallSouth, SAMPLE_WALLS), "South wall");
 });
 
+test("snapPiecePosition pulls to the inner wall face", () => {
+  const walls: WallSeg[] = [{ id: "n", x1: 0, y1: 0, x2: 168, y2: 0 }];
+  const bed: Piece = {
+    id: "bed",
+    kind: "furniture",
+    shape: "rect",
+    label: "Queen bed",
+    x: 40,
+    y: 50,
+    w: 60,
+    h: 80,
+    rot: 0,
+  };
+  const next = snapPiecePosition(bed, 40, 50, walls, []);
+  assert.equal(next.y, 42);
+});
+
+test("snapPiecePosition flushes to a neighbor without overlapping", () => {
+  const ns: Piece = {
+    id: "ns",
+    kind: "furniture",
+    shape: "rect",
+    label: "Nightstand",
+    x: 72,
+    y: 11,
+    w: 20,
+    h: 18,
+    rot: 0,
+  };
+  const bed: Piece = {
+    id: "bed",
+    kind: "furniture",
+    shape: "rect",
+    label: "Queen bed",
+    x: 28,
+    y: 42,
+    w: 60,
+    h: 80,
+    rot: 0,
+  };
+  const next = snapPiecePosition(bed, 28, 42, [], [ns]);
+  assert.equal(next.x, 32);
+  const placed = { ...bed, ...next };
+  assert.equal(aabbsOverlap(aabb(placed), aabb(ns)), false);
+  assert.equal(aabb(placed).x2, aabb(ns).x1);
+});
+
+test("setOpeningClearance types the stub on either side", () => {
+  const wall: WallSeg = { id: "s", x1: 168, y1: 144, x2: 0, y2: 144 };
+  const door = SAMPLE_OPENINGS[0];
+  const labels = clearanceLabels(wall);
+  assert.equal(labels.before, "East of");
+  assert.equal(labels.after, "West of");
+  const moved = setOpeningClearance(wall, door, "before", 48);
+  assert.equal(moved.offset, 48);
+  const clr = openingClearance(wall, moved);
+  assert.equal(clr.before, 48);
+  assert.equal(clr.after, 168 - 48 - moved.width);
+  const fromEnd = setOpeningClearance(wall, door, "after", 24);
+  assert.equal(fromEnd.offset, 168 - door.width - 24);
+});
+
 test("plan json roundtrip", () => {
   const plan = serializePlan({
     walls: [{ id: "w", x1: 0, y1: 0, x2: 12, y2: 0 }],
@@ -250,4 +317,64 @@ test("plan json roundtrip", () => {
   assert.ok(back);
   assert.equal(back.rooms[0].label, "Office");
   assert.equal(parsePlan("not json"), null);
+});
+
+test("snapPiecePosition pulls off the wall centerline onto the inner face", () => {
+  const bed: Piece = {
+    id: "bed",
+    kind: "furniture",
+    shape: "rect",
+    label: "Queen bed",
+    x: 30,
+    y: 40,
+    w: 60,
+    h: 80,
+    rot: 0,
+  };
+  const next = snapPiecePosition(bed, 30, 40, SAMPLE_WALLS, SAMPLE_PIECES);
+  assert.equal(next.x, 32);
+  assert.equal(next.y, 42);
+  const box = aabb({ ...bed, ...next });
+  assert.equal(box.x1, 2);
+  assert.equal(box.y1, 2);
+  assert.equal(box.x2, 62);
+});
+
+test("snapPiecePosition separates a nightstand that overlaps the bed", () => {
+  const bed = SAMPLE_PIECES[0];
+  const ns: Piece = { ...SAMPLE_PIECES[1], x: 70, y: 11 };
+  const next = snapPiecePosition(ns, 70, 11, SAMPLE_WALLS, [bed]);
+  assert.equal(next.x, 72);
+  assert.equal(next.y, 11);
+  assert.equal(aabbsOverlap(aabb({ ...ns, ...next }), aabb(bed)), false);
+  assert.equal(aabb({ ...ns, ...next }).x1, aabb(bed).x2);
+});
+
+test("hitOpening selects the door leaf and the stubs", () => {
+  const body = hitOpening(SAMPLE_OPENINGS, SAMPLE_WALLS, 128, 144);
+  assert.ok(body);
+  assert.equal(body.opening.id, "entry");
+  assert.equal(body.part, "body");
+  const leaf = hitOpening(SAMPLE_OPENINGS, SAMPLE_WALLS, 144, 128);
+  assert.ok(leaf);
+  assert.equal(leaf.opening.id, "entry");
+  assert.equal(leaf.part, "body");
+  const before = hitOpening(SAMPLE_OPENINGS, SAMPLE_WALLS, 156, 144);
+  assert.ok(before);
+  assert.equal(before.opening.id, "entry");
+  assert.equal(before.part, "before");
+  const after = hitOpening(SAMPLE_OPENINGS, SAMPLE_WALLS, 80, 144);
+  assert.ok(after);
+  assert.equal(after.opening.id, "entry");
+  assert.equal(after.part, "after");
+});
+
+test("hitOpening finds a window on the north wall", () => {
+  const body = hitOpening(SAMPLE_OPENINGS, SAMPLE_WALLS, 96, 0);
+  assert.ok(body);
+  assert.equal(body.opening.id, "win1");
+  assert.equal(body.part, "body");
+  const west = hitOpening(SAMPLE_OPENINGS, SAMPLE_WALLS, 40, 0);
+  assert.ok(west);
+  assert.equal(west.part, "before");
 });

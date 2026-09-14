@@ -7,12 +7,15 @@ import {
   clampDoor,
   formatDim,
   hitHandle,
+  hitOpening,
   hitRoom,
   hitTopPiece,
   hitWall,
   isAlongWall,
   isCustomItem,
   lengthIn,
+  openingClearance,
+  openingFrame,
   overlappingIds,
   pieceFromBuiltin,
   pieceFromCatalog,
@@ -21,10 +24,14 @@ import {
   resizeFromHandle,
   sideOf,
   snap,
+  snapPiecePosition,
   snapToJoints,
   uid,
+  wallAxes,
   type EdgeHandle,
   type Opening,
+  type OpeningHit,
+  type OpeningPart,
   type Piece,
   type RoomLabel,
   type Unit,
@@ -55,6 +62,7 @@ type Drag =
   | { kind: "builtin"; wallId: string; t0: number; t1: number; side: 1 | -1 }
   | { kind: "move"; id: string; dx: number; dy: number }
   | { kind: "move-room"; id: string; dx: number; dy: number }
+  | { kind: "opening"; id: string; grab: number; armed: boolean; sx: number; sy: number }
   | { kind: "resize"; id: string; handle: EdgeHandle };
 
 export function FloorCanvas() {
@@ -62,6 +70,7 @@ export function FloorCanvas() {
   const pan = useRef({ x: 36, y: 36 });
   const zoom = useRef(1);
   const drag = useRef<Drag | null>(null);
+  const hover = useRef<OpeningHit | null>(null);
   const walls = useFloor((s) => s.walls);
   const openings = useFloor((s) => s.openings);
   const pieces = useFloor((s) => s.pieces);
@@ -70,6 +79,7 @@ export function FloorCanvas() {
   const catalogId = useFloor((s) => s.catalogId);
   const roomName = useFloor((s) => s.roomName);
   const selected = useFloor((s) => s.selected);
+  const openingFocus = useFloor((s) => s.openingFocus);
   const unit = useFloor((s) => s.unit);
   const wallKeep = useFloor((s) => s.wallKeep);
   const addWall = useFloor((s) => s.addWall);
@@ -78,6 +88,7 @@ export function FloorCanvas() {
   const addRoom = useFloor((s) => s.addRoom);
   const movePiece = useFloor((s) => s.movePiece);
   const moveRoom = useFloor((s) => s.moveRoom);
+  const moveOpening = useFloor((s) => s.moveOpening);
   const resizePiece = useFloor((s) => s.resizePiece);
   const remove = useFloor((s) => s.remove);
   const select = useFloor((s) => s.select);
@@ -93,12 +104,14 @@ export function FloorCanvas() {
     catalogId,
     roomName,
     selected,
+    openingFocus,
     addWall,
     addOpening,
     addPiece,
     addRoom,
     movePiece,
     moveRoom,
+    moveOpening,
     resizePiece,
     remove,
     select,
@@ -114,12 +127,14 @@ export function FloorCanvas() {
     catalogId,
     roomName,
     selected,
+    openingFocus,
     addWall,
     addOpening,
     addPiece,
     addRoom,
     movePiece,
     moveRoom,
+    moveOpening,
     resizePiece,
     remove,
     select,
@@ -148,6 +163,8 @@ export function FloorCanvas() {
         pieces,
         rooms,
         selected,
+        openingFocus,
+        hover: hover.current,
         catalogId,
         unit,
         wallKeep,
@@ -159,13 +176,28 @@ export function FloorCanvas() {
     };
     raf = requestAnimationFrame(loop);
     return () => cancelAnimationFrame(raf);
-  }, [walls, openings, pieces, rooms, selected, catalogId, unit, wallKeep]);
+  }, [walls, openings, pieces, rooms, selected, openingFocus, catalogId, unit, wallKeep]);
 
   useEffect(() => {
     const canvas = canvasRef.current;
     if (!canvas) return;
 
-    const selectExisting = (p: { x: number; y: number }) => {
+    const cursorFor = (p: { x: number; y: number }) => {
+      const s = live.current;
+      if (s.tool === "erase") return "pointer";
+      const sel = s.pieces.find((x) => x.id === s.selected);
+      if (sel && hitHandle(sel, p.x, p.y, 12)) return "nwse-resize";
+      if (hitTopPiece(s.pieces, p.x, p.y)) return "grab";
+      const opening = hitOpening(s.openings, s.walls, p.x, p.y);
+      hover.current = opening;
+      if (opening?.part === "body") return "grab";
+      if (opening) return "text";
+      if (hitRoom(s.rooms, p.x, p.y)) return "grab";
+      if (hitWall(s.walls, p.x, p.y, 14)) return "pointer";
+      return s.tool === "select" ? "default" : "crosshair";
+    };
+
+    const selectExisting = (p: { x: number; y: number }, includeWalls: boolean) => {
       const s = live.current;
       const sel = s.pieces.find((x) => x.id === s.selected);
       if (sel) {
@@ -184,9 +216,21 @@ export function FloorCanvas() {
         drag.current = { kind: "move", id: piece.id, dx: p.x - piece.x, dy: p.y - piece.y };
         return true;
       }
-      const opening = hitOpening(s.openings, s.walls, p.x, p.y);
-      if (opening) {
-        s.select(opening.id);
+      const hit = hitOpening(s.openings, s.walls, p.x, p.y);
+      if (hit) {
+        s.select(hit.opening.id, hit.part);
+        s.checkpoint();
+        if (hit.part === "body") {
+          const host = s.walls.find((w) => w.id === hit.opening.wallId);
+          drag.current = {
+            kind: "opening",
+            id: hit.opening.id,
+            grab: host ? projectT(host, p.x, p.y) - hit.opening.offset : hit.opening.width / 2,
+            armed: false,
+            sx: p.x,
+            sy: p.y,
+          };
+        }
         return true;
       }
       const room = hitRoom(s.rooms, p.x, p.y);
@@ -196,10 +240,12 @@ export function FloorCanvas() {
         drag.current = { kind: "move-room", id: room.id, dx: p.x - room.x, dy: p.y - room.y };
         return true;
       }
-      const wall = hitWall(s.walls, p.x, p.y, 14);
-      if (wall) {
-        s.select(wall.id);
-        return true;
+      if (includeWalls) {
+        const wall = hitWall(s.walls, p.x, p.y, 14);
+        if (wall) {
+          s.select(wall.id);
+          return true;
+        }
       }
       return false;
     };
@@ -218,7 +264,7 @@ export function FloorCanvas() {
         return;
       }
       if (s.tool === "furniture") {
-        if (selectExisting(p)) {
+        if (selectExisting(p, false)) {
           s.setTool("select");
           return;
         }
@@ -242,11 +288,13 @@ export function FloorCanvas() {
           };
           return;
         }
-        s.addPiece(pieceFromCatalog(item, p.x, p.y));
+        const stamped = pieceFromCatalog(item, p.x, p.y);
+        const placed = snapPiecePosition(stamped, stamped.x, stamped.y, s.walls, s.pieces);
+        s.addPiece({ ...stamped, x: placed.x, y: placed.y });
         return;
       }
       if (s.tool === "room") {
-        if (selectExisting(p)) {
+        if (selectExisting(p, false)) {
           s.setTool("select");
           return;
         }
@@ -261,7 +309,7 @@ export function FloorCanvas() {
         }
         const opening = hitOpening(s.openings, s.walls, p.x, p.y);
         if (opening) {
-          s.remove(opening.id);
+          s.remove(opening.opening.id);
           return;
         }
         const room = hitRoom(s.rooms, p.x, p.y);
@@ -274,12 +322,8 @@ export function FloorCanvas() {
         return;
       }
       if (s.tool === "door" || s.tool === "window") {
-        const piece = hitTopPiece(s.pieces, p.x, p.y);
-        if (piece) {
-          s.select(piece.id);
+        if (selectExisting(p, false)) {
           s.setTool("select");
-          s.checkpoint();
-          drag.current = { kind: "move", id: piece.id, dx: p.x - piece.x, dy: p.y - piece.y };
           return;
         }
         const wall = hitWall(s.walls, p.x, p.y, 14);
@@ -297,20 +341,24 @@ export function FloorCanvas() {
         });
         return;
       }
-      if (selectExisting(p)) return;
+      if (selectExisting(p, true)) return;
       s.select(null);
       drag.current = { kind: "pan", x: e.clientX, y: e.clientY, sx: pan.current.x, sy: pan.current.y };
     };
 
     const onMove = (e: PointerEvent) => {
+      const p = worldFromEvent(e, canvas, pan.current, zoom.current);
       const d = drag.current;
-      if (!d) return;
+      if (!d) {
+        canvas.style.cursor = cursorFor(p);
+        return;
+      }
       const s = live.current;
       if (d.kind === "pan") {
         pan.current = { x: d.sx + (e.clientX - d.x), y: d.sy + (e.clientY - d.y) };
+        canvas.style.cursor = "grabbing";
         return;
       }
-      const p = worldFromEvent(e, canvas, pan.current, zoom.current);
       if (d.kind === "wall") {
         const j = snapToJoints(p.x, p.y, s.walls);
         const dx = j.x - d.sx;
@@ -337,11 +385,28 @@ export function FloorCanvas() {
         return;
       }
       if (d.kind === "move") {
-        s.movePiece(d.id, snap(p.x - d.dx), snap(p.y - d.dy));
+        canvas.style.cursor = "grabbing";
+        const piece = s.pieces.find((x) => x.id === d.id);
+        if (!piece) return;
+        const next = snapPiecePosition(piece, p.x - d.dx, p.y - d.dy, s.walls, s.pieces);
+        s.movePiece(d.id, next.x, next.y);
         return;
       }
       if (d.kind === "move-room") {
         s.moveRoom(d.id, snap(p.x - d.dx), snap(p.y - d.dy));
+        return;
+      }
+      if (d.kind === "opening") {
+        if (!d.armed) {
+          if (Math.hypot(p.x - d.sx, p.y - d.sy) < 2) return;
+          d.armed = true;
+        }
+        canvas.style.cursor = "grabbing";
+        const o = s.openings.find((x) => x.id === d.id);
+        if (!o) return;
+        const wall = s.walls.find((w) => w.id === o.wallId);
+        if (!wall) return;
+        s.moveOpening(d.id, projectT(wall, p.x, p.y) - d.grab + o.width / 2);
         return;
       }
       if (d.kind === "resize") {
@@ -387,7 +452,11 @@ export function FloorCanvas() {
       if (d?.kind === "builtin") {
         const wall = s.walls.find((w) => w.id === d.wallId);
         const item = CATALOG.find((c) => c.id === s.catalogId) ?? CATALOG[0];
-        if (wall) s.addPiece(pieceFromBuiltin(wall, d.t0, d.t1, d.side, item));
+        if (wall) {
+          const built = pieceFromBuiltin(wall, d.t0, d.t1, d.side, item);
+          const placed = snapPiecePosition(built, built.x, built.y, s.walls, s.pieces);
+          s.addPiece({ ...built, x: placed.x, y: placed.y });
+        }
       }
       drag.current = null;
     };
@@ -435,16 +504,6 @@ export function FloorCanvas() {
   );
 }
 
-function hitOpening(openings: Opening[], walls: WallSeg[], x: number, y: number) {
-  for (const o of openings) {
-    const wall = walls.find((w) => w.id === o.wallId);
-    if (!wall) continue;
-    const a = along(wall, o.offset + o.width / 2);
-    if (Math.hypot(a.x - x, a.y - y) < 14) return o;
-  }
-  return null;
-}
-
 function draw(
   ctx: CanvasRenderingContext2D,
   w: number,
@@ -455,6 +514,8 @@ function draw(
     pieces: Piece[];
     rooms: RoomLabel[];
     selected: string | null;
+    openingFocus: OpeningPart | null;
+    hover: OpeningHit | null;
     catalogId: string;
     unit: Unit;
     wallKeep: WallKeep;
@@ -463,7 +524,8 @@ function draw(
     drag: Drag | null;
   },
 ) {
-  const { walls, openings, pieces, rooms, selected, catalogId, unit, wallKeep, pan, zoom, drag } = state;
+  const { walls, openings, pieces, rooms, selected, openingFocus, hover, catalogId, unit, wallKeep, pan, zoom, drag } =
+    state;
   const s = PPI * zoom;
   const overlap = overlappingIds(pieces);
   ctx.clearRect(0, 0, w, h);
@@ -534,9 +596,19 @@ function draw(
   }
 
   for (const wall of walls) {
-    drawWall(ctx, wall, openings.filter((o) => o.wallId === wall.id), s, wall.id === selected, unit);
+    drawWall(
+      ctx,
+      wall,
+      openings.filter((o) => o.wallId === wall.id),
+      s,
+      wall.id === selected,
+      selected,
+      openingFocus,
+      hover,
+      unit,
+    );
   }
-  const selectedWall = walls.find((w) => w.id === selected);
+  const selectedWall = walls.find((wl) => wl.id === selected);
   if (selectedWall) drawWallEnds(ctx, selectedWall, s, wallKeep);
   if (drag?.kind === "wall") {
     const len = Math.hypot(drag.x - drag.sx, drag.y - drag.sy);
@@ -602,12 +674,7 @@ function drawHandles(ctx: CanvasRenderingContext2D, piece: Piece, s: number) {
   }
 }
 
-function drawWallEnds(
-  ctx: CanvasRenderingContext2D,
-  wall: WallSeg,
-  s: number,
-  keep: WallKeep,
-) {
+function drawWallEnds(ctx: CanvasRenderingContext2D, wall: WallSeg, s: number, keep: WallKeep) {
   const mark = (x: number, y: number, kind: "a" | "b", on: boolean) => {
     ctx.beginPath();
     if (kind === "a") ctx.rect(x * s - 5, y * s - 5, 10, 10);
@@ -633,89 +700,232 @@ function drawWall(
   openings: Opening[],
   s: number,
   on: boolean,
+  selectedId: string | null,
+  openingFocus: OpeningPart | null,
+  hover: OpeningHit | null,
   unit: Unit,
 ) {
   const L = lengthIn(wall) || 1;
-  const ux = (wall.x2 - wall.x1) / L;
-  const uy = (wall.y2 - wall.y1) / L;
+  const { ux, uy } = wallAxes(wall);
   const cuts = openings
     .map((o) => ({ o, a: o.offset, b: o.offset + o.width }))
     .sort((a, b) => a.a - b.a);
-  const wallColor = on ? "#b32440" : "#afafaf";
-  const wallWidth = Math.max(2, WALL_THICK * s * (on ? 1.15 : 1));
-  let cursor = 0;
-  const strokeSeg = (a: number, b: number) => {
+  const picked = openings.find((o) => o.id === selectedId) ?? null;
+  const hovered = hover && openings.some((o) => o.id === hover.opening.id) ? hover : null;
+  const wallColor = on && !picked ? "#b32440" : "#afafaf";
+  const wallWidth = Math.max(2, WALL_THICK * s * (on && !picked ? 1.15 : 1));
+  const strokeSeg = (a: number, b: number, tone: "plain" | "stub" | "focus") => {
     if (b - a < 1) return;
     const p = along(wall, a);
     const q = along(wall, b);
-    ctx.strokeStyle = wallColor;
-    ctx.lineWidth = wallWidth;
+    ctx.strokeStyle = tone === "plain" ? wallColor : "#b32440";
+    ctx.lineWidth =
+      tone === "focus" ? Math.max(4, WALL_THICK * s * 1.55) : tone === "stub" ? Math.max(3, WALL_THICK * s * 1.25) : wallWidth;
     ctx.lineCap = "butt";
     ctx.beginPath();
     ctx.moveTo(p.x * s, p.y * s);
     ctx.lineTo(q.x * s, q.y * s);
     ctx.stroke();
   };
+  const toneForGap = (from: number, to: number): "plain" | "stub" | "focus" => {
+    const o = picked ?? hovered?.opening ?? null;
+    if (!o) return "plain";
+    const part: OpeningPart | null = Math.abs(to - o.offset) < 0.05 ? "before" : Math.abs(from - (o.offset + o.width)) < 0.05 ? "after" : null;
+    if (!part) return "plain";
+    if (picked?.id === o.id) return openingFocus === part ? "focus" : "stub";
+    if (hovered?.opening.id === o.id && hovered.part === part) return "stub";
+    return "plain";
+  };
+  let cursor = 0;
   for (const c of cuts) {
-    strokeSeg(cursor, c.a);
-    drawOpening(ctx, wall, c.o, ux, uy, s, on);
+    strokeSeg(cursor, c.a, toneForGap(cursor, c.a));
+    drawOpening(ctx, wall, c.o, s, on, c.o.id === selectedId, hovered?.opening.id === c.o.id);
     cursor = c.b;
   }
-  strokeSeg(cursor, L);
+  strokeSeg(cursor, L, toneForGap(cursor, L));
 
-  ctx.fillStyle = on ? "#eceaea" : "#8c8888";
   ctx.font = '10px "IBM Plex Mono", monospace';
   ctx.textAlign = "center";
   ctx.textBaseline = "middle";
-  const mx = ((wall.x1 + wall.x2) / 2) * s - uy * 12;
-  const my = ((wall.y1 + wall.y2) / 2) * s + ux * 12;
-  ctx.fillText(formatDim(L, unit), mx, my);
+  if (picked) {
+    const clr = openingClearance(wall, picked);
+    if (clr.before >= 6) {
+      drawDimPill(
+        ctx,
+        wall,
+        0,
+        picked.offset,
+        s,
+        formatDim(clr.before, unit),
+        openingFocus === "before",
+        ux,
+        uy,
+      );
+    }
+    if (clr.after >= 6) {
+      drawDimPill(
+        ctx,
+        wall,
+        picked.offset + picked.width,
+        L,
+        s,
+        formatDim(clr.after, unit),
+        openingFocus === "after",
+        ux,
+        uy,
+      );
+    }
+    drawDimPill(
+      ctx,
+      wall,
+      picked.offset,
+      picked.offset + picked.width,
+      s,
+      formatDim(picked.width, unit),
+      openingFocus === "body",
+      ux,
+      uy,
+      true,
+    );
+  } else {
+    ctx.fillStyle = on ? "#eceaea" : "#8c8888";
+    const mx = ((wall.x1 + wall.x2) / 2) * s - uy * 12;
+    const my = ((wall.y1 + wall.y2) / 2) * s + ux * 12;
+    ctx.fillText(formatDim(L, unit), mx, my);
+  }
+}
+
+function drawDimPill(
+  ctx: CanvasRenderingContext2D,
+  wall: WallSeg,
+  t0: number,
+  t1: number,
+  s: number,
+  label: string,
+  focus: boolean,
+  ux: number,
+  uy: number,
+  inside = false,
+) {
+  const mid = along(wall, (t0 + t1) / 2);
+  const dir = inside ? 1 : -1;
+  const tx = (mid.x - uy * 11 * dir) * s;
+  const ty = (mid.y + ux * 11 * dir) * s;
+  ctx.save();
+  ctx.font = `600 10px "IBM Plex Mono", monospace`;
+  ctx.textAlign = "center";
+  ctx.textBaseline = "middle";
+  const padX = 6;
+  const padY = 4;
+  const tw = ctx.measureText(label).width;
+  const w = tw + padX * 2;
+  const h = 16;
+  ctx.fillStyle = focus ? "#b32440" : "rgba(12,11,11,0.92)";
+  ctx.strokeStyle = "#b32440";
+  ctx.lineWidth = focus ? 1.8 : 1;
+  ctx.beginPath();
+  const r = 3;
+  ctx.moveTo(tx - w / 2 + r, ty - h / 2);
+  ctx.lineTo(tx + w / 2 - r, ty - h / 2);
+  ctx.quadraticCurveTo(tx + w / 2, ty - h / 2, tx + w / 2, ty - h / 2 + r);
+  ctx.lineTo(tx + w / 2, ty + h / 2 - r);
+  ctx.quadraticCurveTo(tx + w / 2, ty + h / 2, tx + w / 2 - r, ty + h / 2);
+  ctx.lineTo(tx - w / 2 + r, ty + h / 2);
+  ctx.quadraticCurveTo(tx - w / 2, ty + h / 2, tx - w / 2, ty + h / 2 - r);
+  ctx.lineTo(tx - w / 2, ty - h / 2 + r);
+  ctx.quadraticCurveTo(tx - w / 2, ty - h / 2, tx - w / 2 + r, ty - h / 2);
+  ctx.closePath();
+  ctx.fill();
+  ctx.stroke();
+  ctx.fillStyle = focus ? "#eceaea" : "#eceaea";
+  ctx.fillText(label, tx, ty);
+  const a = along(wall, t0);
+  const b = along(wall, t1);
+  ctx.strokeStyle = focus ? "#b32440" : "rgba(179,36,64,0.7)";
+  ctx.lineWidth = 1;
+  ctx.beginPath();
+  ctx.moveTo(a.x * s, a.y * s);
+  ctx.lineTo((a.x - uy * 6 * dir) * s, (a.y + ux * 6 * dir) * s);
+  ctx.moveTo(b.x * s, b.y * s);
+  ctx.lineTo((b.x - uy * 6 * dir) * s, (b.y + ux * 6 * dir) * s);
+  ctx.stroke();
+  ctx.restore();
 }
 
 function drawOpening(
   ctx: CanvasRenderingContext2D,
   wall: WallSeg,
   o: Opening,
-  ux: number,
-  uy: number,
   s: number,
   on: boolean,
+  picked: boolean,
+  hovered: boolean,
 ) {
   ctx.save();
   ctx.lineCap = "butt";
-  const a = along(wall, o.offset);
-  const b = along(wall, o.offset + o.width);
-  const nx = -uy;
-  const ny = ux;
+  const f = openingFrame(wall, o);
   const half = WALL_THICK / 2;
+  if (picked || hovered) {
+    ctx.strokeStyle = picked ? "rgba(179,36,64,0.55)" : "rgba(179,36,64,0.28)";
+    ctx.lineWidth = Math.max(12, WALL_THICK * s * (picked ? 2.8 : 2));
+    ctx.beginPath();
+    ctx.moveTo(f.a.x * s, f.a.y * s);
+    ctx.lineTo(f.b.x * s, f.b.y * s);
+    ctx.stroke();
+  }
   if (o.kind === "window") {
-    ctx.strokeStyle = on ? "#eceaea" : "#afafaf";
-    ctx.lineWidth = Math.max(1.2, s * 0.65);
+    if (picked) {
+      ctx.fillStyle = "rgba(179,36,64,0.22)";
+      ctx.beginPath();
+      ctx.moveTo((f.a.x + f.nx * half) * s, (f.a.y + f.ny * half) * s);
+      ctx.lineTo((f.b.x + f.nx * half) * s, (f.b.y + f.ny * half) * s);
+      ctx.lineTo((f.b.x - f.nx * half) * s, (f.b.y - f.ny * half) * s);
+      ctx.lineTo((f.a.x - f.nx * half) * s, (f.a.y - f.ny * half) * s);
+      ctx.closePath();
+      ctx.fill();
+    }
+    ctx.strokeStyle = picked ? "#eceaea" : on ? "#eceaea" : "#afafaf";
+    ctx.lineWidth = Math.max(picked ? 2.2 : 1.2, s * 0.65);
     for (const d of [-half, half]) {
       ctx.beginPath();
-      ctx.moveTo((a.x + nx * d) * s, (a.y + ny * d) * s);
-      ctx.lineTo((b.x + nx * d) * s, (b.y + ny * d) * s);
+      ctx.moveTo((f.a.x + f.nx * d) * s, (f.a.y + f.ny * d) * s);
+      ctx.lineTo((f.b.x + f.nx * d) * s, (f.b.y + f.ny * d) * s);
       ctx.stroke();
     }
-    ctx.restore();
-    return;
+  } else {
+    const startAng = Math.atan2(f.closed.y, f.closed.x);
+    if (picked) {
+      ctx.fillStyle = "rgba(179,36,64,0.2)";
+      ctx.beginPath();
+      ctx.moveTo(f.hinge.x * s, f.hinge.y * s);
+      ctx.arc(f.hinge.x * s, f.hinge.y * s, o.width * s, startAng, startAng + f.sweep, f.sweep < 0);
+      ctx.closePath();
+      ctx.fill();
+    }
+    ctx.strokeStyle = picked ? "#b32440" : on ? "rgba(179,36,64,0.9)" : "rgba(179,36,64,0.75)";
+    ctx.lineWidth = picked ? 2.6 : 1.2;
+    ctx.beginPath();
+    ctx.arc(f.hinge.x * s, f.hinge.y * s, o.width * s, startAng, startAng + f.sweep, f.sweep < 0);
+    ctx.stroke();
+    ctx.lineWidth = picked ? 3 : 1.6;
+    ctx.beginPath();
+    ctx.moveTo(f.hinge.x * s, f.hinge.y * s);
+    ctx.lineTo(f.leaf.x * s, f.leaf.y * s);
+    ctx.stroke();
   }
-  const hinge = o.hinge === "start" ? a : b;
-  const sx = nx * o.side;
-  const sy = ny * o.side;
-  const closed = o.hinge === "start" ? { x: ux, y: uy } : { x: -ux, y: -uy };
-  const startAng = Math.atan2(closed.y, closed.x);
-  const sweep = (Math.PI / 2) * o.side * (o.hinge === "start" ? 1 : -1);
-  ctx.strokeStyle = on ? "rgba(179,36,64,0.9)" : "rgba(179,36,64,0.75)";
-  ctx.lineWidth = 1.2;
-  ctx.beginPath();
-  ctx.arc(hinge.x * s, hinge.y * s, o.width * s, startAng, startAng + sweep, sweep < 0);
-  ctx.stroke();
-  ctx.lineWidth = 1.6;
-  ctx.beginPath();
-  ctx.moveTo(hinge.x * s, hinge.y * s);
-  ctx.lineTo((hinge.x + sx * o.width) * s, (hinge.y + sy * o.width) * s);
-  ctx.stroke();
+  if (picked) {
+    ctx.fillStyle = "#eceaea";
+    ctx.strokeStyle = "#b32440";
+    ctx.lineWidth = 2;
+    const tick = (pt: { x: number; y: number }) => {
+      ctx.beginPath();
+      ctx.rect(pt.x * s - 5, pt.y * s - 5, 10, 10);
+      ctx.fill();
+      ctx.stroke();
+    };
+    tick(f.a);
+    tick(f.b);
+  }
   ctx.restore();
 }
 
