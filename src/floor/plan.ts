@@ -1,7 +1,10 @@
 export const SNAP = 6;
 export const WALL_THICK = 4;
+export const IN_PER_M = 39.37007874015748;
 
-export type Tool = "wall" | "door" | "window" | "room" | "erase" | "furniture" | null;
+export type Tool = "select" | "wall" | "door" | "window" | "room" | "erase" | "furniture";
+export type Unit = "imperial" | "metric";
+export type WallKeep = "start" | "end";
 
 export type WallSeg = {
   id: string;
@@ -125,13 +128,112 @@ export function lengthIn(w: WallSeg) {
 
 export function fmtIn(n: number) {
   const abs = Math.abs(n);
-  let ft = Math.floor(abs / 12);
-  let inch = Math.round(abs % 12);
-  if (inch === 12) {
+  let ft = Math.floor(abs / 12 + 1e-9);
+  let inch = Math.round((abs - ft * 12) * 4) / 4;
+  if (inch >= 12) {
     ft += 1;
     inch = 0;
   }
+  if (inch === 0) return `${ft}' 0"`;
+  if (Number.isInteger(inch)) return `${ft}' ${inch}"`;
   return `${ft}' ${inch}"`;
+}
+
+export function formatDim(inches: number, unit: Unit): string {
+  if (unit === "metric") {
+    const cm = Math.abs(inches) * 2.54;
+    if (cm >= 100) {
+      const m = Math.round((cm / 100) * 100) / 100;
+      return `${m} m`;
+    }
+    return `${Math.round(cm)} cm`;
+  }
+  return fmtIn(inches);
+}
+
+export function formatDimAlt(inches: number, unit: Unit): string {
+  return formatDim(inches, unit === "imperial" ? "metric" : "imperial");
+}
+
+export function parseDim(raw: string, fallback: Unit): number | null {
+  let t = raw.trim().toLowerCase();
+  if (!t) return null;
+  t = t
+    .replace(/[′’]/g, "'")
+    .replace(/[″“”]/g, '"')
+    .replace(/,/g, " ")
+    .replace(/feet|foot/g, "ft")
+    .replace(/inches|inch/g, "in")
+    .replace(/meters|meter/g, "m")
+    .replace(/centimeters|centimeter/g, "cm")
+    .replace(/millimeters|millimeter/g, "mm")
+    .replace(/\s+/g, " ")
+    .trim();
+
+  const ftIn = t.match(/^(\d+(?:\.\d+)?)\s*(?:'|ft)\s*(\d+(?:\.\d+)?)?\s*(?:"|in)?$/);
+  if (ftIn) {
+    const ft = Number(ftIn[1]);
+    const inch = ftIn[2] ? Number(ftIn[2]) : 0;
+    if (!Number.isFinite(ft) || !Number.isFinite(inch) || ft < 0 || inch < 0) return null;
+    return ft * 12 + inch;
+  }
+
+  const inchesOnly = t.match(/^(\d+(?:\.\d+)?)\s*(?:"|in)$/);
+  if (inchesOnly) {
+    const n = Number(inchesOnly[1]);
+    return Number.isFinite(n) && n >= 0 ? n : null;
+  }
+
+  const mm = t.match(/^(\d+(?:\.\d+)?)\s*mm$/);
+  if (mm) {
+    const n = Number(mm[1]);
+    return Number.isFinite(n) && n >= 0 ? n / 25.4 : null;
+  }
+  const cm = t.match(/^(\d+(?:\.\d+)?)\s*cm$/);
+  if (cm) {
+    const n = Number(cm[1]);
+    return Number.isFinite(n) && n >= 0 ? n / 2.54 : null;
+  }
+  const meters = t.match(/^(\d+(?:\.\d+)?)\s*m$/);
+  if (meters) {
+    const n = Number(meters[1]);
+    return Number.isFinite(n) && n >= 0 ? n * IN_PER_M : null;
+  }
+
+  if (/^\d+(?:\.\d+)?$/.test(t)) {
+    const n = Number(t);
+    if (!Number.isFinite(n) || n < 0) return null;
+    return fallback === "metric" ? n / 2.54 : n;
+  }
+  return null;
+}
+
+export function clampDim(n: number, min = 1, max = 2400) {
+  if (!Number.isFinite(n)) return min;
+  return Math.min(max, Math.max(min, n));
+}
+
+export function wallCaption(wall: WallSeg, walls: WallSeg[]): string {
+  const pts = walls.flatMap((w) => [
+    { x: w.x1, y: w.y1 },
+    { x: w.x2, y: w.y2 },
+  ]);
+  if (!pts.length) return "Wall";
+  const minX = Math.min(...pts.map((p) => p.x));
+  const maxX = Math.max(...pts.map((p) => p.x));
+  const minY = Math.min(...pts.map((p) => p.y));
+  const maxY = Math.max(...pts.map((p) => p.y));
+  const mx = (wall.x1 + wall.x2) / 2;
+  const my = (wall.y1 + wall.y2) / 2;
+  const horiz = Math.abs(wall.x2 - wall.x1) >= Math.abs(wall.y2 - wall.y1);
+  if (horiz) {
+    if (Math.abs(my - minY) <= 1) return "North wall";
+    if (Math.abs(my - maxY) <= 1) return "South wall";
+    return "Partition";
+  }
+  if (Math.abs(mx - minX) <= 1) return "West wall";
+  if (Math.abs(mx - maxX) <= 1) return "East wall";
+  return "Partition";
 }
 
 export function along(w: WallSeg, t: number) {
@@ -228,6 +330,75 @@ export function hitRoom(rooms: RoomLabel[], x: number, y: number) {
     }
   }
   return best;
+}
+
+export type EdgeHandle = "e" | "w" | "n" | "s";
+
+export function pieceHandles(piece: Piece) {
+  const hw = piece.w / 2;
+  const hh = piece.h / 2;
+  const rad = (piece.rot * Math.PI) / 180;
+  const c = Math.cos(rad);
+  const s = Math.sin(rad);
+  const locals: { id: EdgeHandle; lx: number; ly: number }[] = [
+    { id: "e", lx: hw, ly: 0 },
+    { id: "w", lx: -hw, ly: 0 },
+    { id: "n", lx: 0, ly: -hh },
+    { id: "s", lx: 0, ly: hh },
+  ];
+  return locals.map((h) => ({
+    id: h.id,
+    x: piece.x + h.lx * c - h.ly * s,
+    y: piece.y + h.lx * s + h.ly * c,
+  }));
+}
+
+export function hitHandle(piece: Piece, x: number, y: number, max = 10) {
+  let best: EdgeHandle | null = null;
+  let dmin = max;
+  for (const h of pieceHandles(piece)) {
+    const d = Math.hypot(h.x - x, h.y - y);
+    if (d < dmin) {
+      dmin = d;
+      best = h.id;
+    }
+  }
+  return best;
+}
+
+export function resizeFromHandle(
+  piece: Piece,
+  handle: EdgeHandle,
+  worldX: number,
+  worldY: number,
+): Pick<Piece, "x" | "y" | "w" | "h"> {
+  const local = localPoint(piece, worldX, worldY);
+  const rad = (piece.rot * Math.PI) / 180;
+  const c = Math.cos(rad);
+  const s = Math.sin(rad);
+  let w = piece.w;
+  let h = piece.h;
+  let lx = 0;
+  let ly = 0;
+  if (handle === "e") {
+    w = clampDim(local.x + piece.w / 2, 6, 600);
+    lx = (w - piece.w) / 2;
+  } else if (handle === "w") {
+    w = clampDim(piece.w / 2 - local.x, 6, 600);
+    lx = (piece.w - w) / 2;
+  } else if (handle === "s") {
+    h = clampDim(local.y + piece.h / 2, 6, 600);
+    ly = (h - piece.h) / 2;
+  } else {
+    h = clampDim(piece.h / 2 - local.y, 6, 600);
+    ly = (piece.h - h) / 2;
+  }
+  return {
+    w,
+    h,
+    x: piece.x + lx * c - ly * s,
+    y: piece.y + lx * s + ly * c,
+  };
 }
 
 export function rotate90(rot: number) {
@@ -335,6 +506,52 @@ export function overlappingIds(pieces: Piece[]) {
   return ids;
 }
 
+export function nearPt(ax: number, ay: number, bx: number, by: number, eps = 0.6) {
+  return Math.hypot(ax - bx, ay - by) <= eps;
+}
+
+export function setWallLength(wall: WallSeg, length: number, keep: WallKeep) {
+  const L = lengthIn(wall) || 1;
+  const len = clampDim(length, 12, 2400);
+  if (keep === "start") {
+    const ux = (wall.x2 - wall.x1) / L;
+    const uy = (wall.y2 - wall.y1) / L;
+    const to = { x: wall.x1 + ux * len, y: wall.y1 + uy * len };
+    return { wall: { ...wall, x2: to.x, y2: to.y }, from: { x: wall.x2, y: wall.y2 }, to };
+  }
+  const ux = (wall.x1 - wall.x2) / L;
+  const uy = (wall.y1 - wall.y2) / L;
+  const to = { x: wall.x2 + ux * len, y: wall.y2 + uy * len };
+  return { wall: { ...wall, x1: to.x, y1: to.y }, from: { x: wall.x1, y: wall.y1 }, to };
+}
+
+export function slideJoint(walls: WallSeg[], from: { x: number; y: number }, to: { x: number; y: number }): WallSeg[] {
+  const dx = to.x - from.x;
+  const dy = to.y - from.y;
+  if (Math.abs(dx) < 1e-9 && Math.abs(dy) < 1e-9) return walls;
+  const horizontal = Math.abs(dx) >= Math.abs(dy);
+  return walls.map((w) => {
+    const n = { ...w };
+    if (horizontal) {
+      if (Math.abs(w.x1 - from.x) <= 0.6) n.x1 = to.x;
+      if (Math.abs(w.x2 - from.x) <= 0.6) n.x2 = to.x;
+    } else {
+      if (Math.abs(w.y1 - from.y) <= 0.6) n.y1 = to.y;
+      if (Math.abs(w.y2 - from.y) <= 0.6) n.y2 = to.y;
+    }
+    return n;
+  });
+}
+
+export function clampOpenings(walls: WallSeg[], openings: Opening[]): Opening[] {
+  return openings.map((o) => {
+    const wall = walls.find((w) => w.id === o.wallId);
+    if (!wall) return o;
+    const placed = clampDoor(wall, o.offset + o.width / 2, o.width);
+    return { ...o, offset: placed.offset, width: placed.width };
+  });
+}
+
 export function serializePlan(data: Omit<PlanData, "v">): PlanData {
   return {
     v: 1,
@@ -379,25 +596,26 @@ export const SAMPLE_WALLS: WallSeg[] = [
 ];
 
 export const SAMPLE_OPENINGS: Opening[] = [
-  { id: "entry", wallId: "s", kind: "door", offset: 156, width: 36, hinge: "end", side: -1 },
-  { id: "bathd", wallId: "bath", kind: "door", offset: 52, width: 28, hinge: "start", side: -1 },
+  { id: "entry", wallId: "s", kind: "door", offset: 164, width: 36, hinge: "end", side: 1 },
+  { id: "bathd", wallId: "bath", kind: "door", offset: 60, width: 24, hinge: "start", side: 1 },
   { id: "win1", wallId: "n", kind: "window", offset: 36, width: 48, hinge: "start", side: 1 },
-  { id: "win2", wallId: "s", kind: "window", offset: 36, width: 60, hinge: "start", side: 1 },
+  { id: "win2", wallId: "s", kind: "window", offset: 12, width: 36, hinge: "start", side: 1 },
 ];
 
 export const SAMPLE_PIECES: Piece[] = [
-  { id: "bed", kind: "furniture", shape: "rect", label: "Queen bed", x: 66, y: 48, w: 60, h: 80, rot: 0 },
-  { id: "ns", kind: "furniture", shape: "rect", label: "Nightstand", x: 108, y: 18, w: 20, h: 18, rot: 0 },
-  { id: "ward", kind: "wardrobe", shape: "rect", label: "Built-in", x: 18, y: 144, w: 24, h: 72, rot: 0 },
-  { id: "sofa", kind: "furniture", shape: "rect", label: "Sofa", x: 108, y: 148, w: 84, h: 36, rot: 0 },
-  { id: "desk", kind: "furniture", shape: "rect", label: "Desk", x: 168, y: 148, w: 60, h: 30, rot: 90 },
-  { id: "fr", kind: "furniture", shape: "rect", label: "Fridge", x: 216, y: 132, w: 32, h: 30, rot: 0 },
+  { id: "bed", kind: "furniture", shape: "rect", label: "Queen bed", x: 32, y: 42, w: 60, h: 80, rot: 0 },
+  { id: "ns", kind: "furniture", shape: "rect", label: "Nightstand", x: 72, y: 11, w: 20, h: 18, rot: 0 },
+  { id: "desk", kind: "furniture", shape: "rect", label: "Desk", x: 118, y: 17, w: 60, h: 30, rot: 0 },
+  { id: "ward", kind: "wardrobe", shape: "rect", label: "Built-in", x: 14, y: 130, w: 72, h: 24, rot: 90 },
+  { id: "sofa", kind: "furniture", shape: "rect", label: "Sofa", x: 132, y: 148, w: 84, h: 36, rot: 0 },
+  { id: "fr", kind: "furniture", shape: "rect", label: "Fridge", x: 222, y: 113, w: 32, h: 30, rot: 0 },
+  { id: "van", kind: "furniture", shape: "rect", label: "Vanity", x: 212, y: 12.5, w: 36, h: 21, rot: 0 },
+  { id: "wc", kind: "furniture", shape: "rect", label: "Toilet", x: 224, y: 39, w: 28, h: 18, rot: 0 },
 ];
 
 export const SAMPLE_ROOMS: RoomLabel[] = [
-  { id: "r-bed", label: "Bedroom", x: 150, y: 72 },
-  { id: "r-liv", label: "Living", x: 70, y: 118 },
-  { id: "r-bath", label: "Bath", x: 216, y: 48 },
-  { id: "r-kit", label: "Kitchen", x: 216, y: 132 },
+  { id: "r-bed", label: "Bedroom", x: 100, y: 50 },
+  { id: "r-liv", label: "Living", x: 100, y: 118 },
+  { id: "r-bath", label: "Bath", x: 216, y: 78 },
+  { id: "r-kit", label: "Kitchen", x: 216, y: 142 },
 ];
-

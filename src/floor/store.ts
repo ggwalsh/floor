@@ -5,6 +5,10 @@ import {
   SAMPLE_PIECES,
   SAMPLE_ROOMS,
   SAMPLE_WALLS,
+  clampDoor,
+  clampOpenings,
+  setWallLength,
+  slideJoint,
   snap,
   uid,
   type Opening,
@@ -12,6 +16,8 @@ import {
   type PlanData,
   type RoomLabel,
   type Tool,
+  type Unit,
+  type WallKeep,
   type WallSeg,
 } from "./plan";
 
@@ -31,11 +37,15 @@ type Store = {
   catalogId: string;
   roomName: string;
   selected: string | null;
+  unit: Unit;
+  wallKeep: WallKeep;
   past: Snapshot[];
   future: Snapshot[];
   setTool: (t: Tool) => void;
   setCatalogId: (id: string) => void;
   setRoomName: (name: string) => void;
+  setUnit: (unit: Unit) => void;
+  setWallKeep: (keep: WallKeep) => void;
   select: (id: string | null) => void;
   addWall: (w: WallSeg) => void;
   addOpening: (o: Opening) => void;
@@ -43,9 +53,12 @@ type Store = {
   addRoom: (r: RoomLabel) => void;
   movePiece: (id: string, x: number, y: number) => void;
   moveRoom: (id: string, x: number, y: number) => void;
+  resizePiece: (id: string, patch: Pick<Piece, "x" | "y" | "w" | "h">) => void;
   updatePiece: (id: string, patch: Partial<Piece>) => void;
   updateOpening: (id: string, patch: Partial<Opening>) => void;
+  updateOpeningWidth: (id: string, width: number) => void;
   updateRoom: (id: string, patch: Partial<RoomLabel>) => void;
+  updateWallLength: (id: string, length: number) => void;
   nudge: (id: string, dx: number, dy: number) => void;
   duplicate: (id: string) => void;
   remove: (id: string) => void;
@@ -74,15 +87,19 @@ export const useFloor = create<Store>()(
       openings: SAMPLE_OPENINGS,
       pieces: SAMPLE_PIECES,
       rooms: SAMPLE_ROOMS,
-      tool: null,
+      tool: "select",
       catalogId: "queen",
       roomName: "Bedroom",
       selected: null,
+      unit: "imperial",
+      wallKeep: "start",
       past: [],
       future: [],
       setTool: (tool) => set({ tool }),
       setCatalogId: (catalogId) => set({ catalogId, tool: "furniture" }),
       setRoomName: (roomName) => set({ roomName, tool: "room" }),
+      setUnit: (unit) => set({ unit }),
+      setWallKeep: (wallKeep) => set({ wallKeep }),
       select: (selected) => set({ selected }),
       addWall: (w) =>
         set((s) => ({
@@ -90,6 +107,7 @@ export const useFloor = create<Store>()(
           future: [],
           walls: [...s.walls, w],
           selected: w.id,
+          tool: "select",
         })),
       addOpening: (o) =>
         set((s) => ({
@@ -120,6 +138,10 @@ export const useFloor = create<Store>()(
         set((s) => ({
           rooms: s.rooms.map((r) => (r.id === id ? { ...r, x, y } : r)),
         })),
+      resizePiece: (id, patch) =>
+        set((s) => ({
+          pieces: s.pieces.map((p) => (p.id === id ? { ...p, ...patch } : p)),
+        })),
       updatePiece: (id, patch) =>
         set((s) => ({
           past: [...s.past, snapOf(s)].slice(-50),
@@ -132,12 +154,38 @@ export const useFloor = create<Store>()(
           future: [],
           openings: s.openings.map((o) => (o.id === id ? { ...o, ...patch } : o)),
         })),
+      updateOpeningWidth: (id, width) =>
+        set((s) => {
+          const o = s.openings.find((x) => x.id === id);
+          if (!o) return s;
+          const wall = s.walls.find((w) => w.id === o.wallId);
+          if (!wall) return s;
+          const placed = clampDoor(wall, o.offset + o.width / 2, width);
+          return {
+            past: [...s.past, snapOf(s)].slice(-50),
+            future: [],
+            openings: s.openings.map((x) => (x.id === id ? { ...x, ...placed } : x)),
+          };
+        }),
       updateRoom: (id, patch) =>
         set((s) => ({
           past: [...s.past, snapOf(s)].slice(-50),
           future: [],
           rooms: s.rooms.map((r) => (r.id === id ? { ...r, ...patch } : r)),
         })),
+      updateWallLength: (id, length) =>
+        set((s) => {
+          const wall = s.walls.find((w) => w.id === id);
+          if (!wall) return s;
+          const next = setWallLength(wall, length, s.wallKeep);
+          const walls = slideJoint(s.walls, next.from, next.to);
+          return {
+            past: [...s.past, snapOf(s)].slice(-50),
+            future: [],
+            walls,
+            openings: clampOpenings(walls, s.openings),
+          };
+        }),
       nudge: (id, dx, dy) =>
         set((s) => ({
           past: [...s.past, snapOf(s)].slice(-50),
@@ -230,16 +278,23 @@ export const useFloor = create<Store>()(
     }),
     {
       name: "gw-floor",
-      version: 2,
+      version: 4,
       migrate: (persisted) => {
         const p = (persisted ?? {}) as Partial<Store>;
-        return { ...p, rooms: p.rooms ?? [] } as Store;
+        return {
+          walls: structuredClone(SAMPLE_WALLS),
+          openings: structuredClone(SAMPLE_OPENINGS),
+          pieces: structuredClone(SAMPLE_PIECES),
+          rooms: structuredClone(SAMPLE_ROOMS),
+          unit: p.unit === "metric" ? "metric" : "imperial",
+        } as Store;
       },
       partialize: (s) => ({
         walls: s.walls,
         openings: s.openings,
         pieces: s.pieces,
         rooms: s.rooms,
+        unit: s.unit,
       }),
     },
   ),

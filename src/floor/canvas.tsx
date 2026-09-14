@@ -5,7 +5,8 @@ import {
   WALL_THICK,
   along,
   clampDoor,
-  fmtIn,
+  formatDim,
+  hitHandle,
   hitRoom,
   hitTopPiece,
   hitWall,
@@ -15,14 +16,19 @@ import {
   overlappingIds,
   pieceFromBuiltin,
   pieceFromCatalog,
+  pieceHandles,
   projectT,
+  resizeFromHandle,
   sideOf,
   snap,
   snapToJoints,
   uid,
+  type EdgeHandle,
   type Opening,
   type Piece,
   type RoomLabel,
+  type Unit,
+  type WallKeep,
   type WallSeg,
 } from "./plan";
 import { useFloor } from "./store";
@@ -48,7 +54,8 @@ type Drag =
   | { kind: "custom"; x: number; y: number; sx: number; sy: number }
   | { kind: "builtin"; wallId: string; t0: number; t1: number; side: 1 | -1 }
   | { kind: "move"; id: string; dx: number; dy: number }
-  | { kind: "move-room"; id: string; dx: number; dy: number };
+  | { kind: "move-room"; id: string; dx: number; dy: number }
+  | { kind: "resize"; id: string; handle: EdgeHandle };
 
 export function FloorCanvas() {
   const canvasRef = useRef<HTMLCanvasElement>(null);
@@ -63,15 +70,62 @@ export function FloorCanvas() {
   const catalogId = useFloor((s) => s.catalogId);
   const roomName = useFloor((s) => s.roomName);
   const selected = useFloor((s) => s.selected);
+  const unit = useFloor((s) => s.unit);
+  const wallKeep = useFloor((s) => s.wallKeep);
   const addWall = useFloor((s) => s.addWall);
   const addOpening = useFloor((s) => s.addOpening);
   const addPiece = useFloor((s) => s.addPiece);
   const addRoom = useFloor((s) => s.addRoom);
   const movePiece = useFloor((s) => s.movePiece);
   const moveRoom = useFloor((s) => s.moveRoom);
+  const resizePiece = useFloor((s) => s.resizePiece);
   const remove = useFloor((s) => s.remove);
   const select = useFloor((s) => s.select);
   const checkpoint = useFloor((s) => s.checkpoint);
+  const setTool = useFloor((s) => s.setTool);
+
+  const live = useRef({
+    walls,
+    openings,
+    pieces,
+    rooms,
+    tool,
+    catalogId,
+    roomName,
+    selected,
+    addWall,
+    addOpening,
+    addPiece,
+    addRoom,
+    movePiece,
+    moveRoom,
+    resizePiece,
+    remove,
+    select,
+    checkpoint,
+    setTool,
+  });
+  live.current = {
+    walls,
+    openings,
+    pieces,
+    rooms,
+    tool,
+    catalogId,
+    roomName,
+    selected,
+    addWall,
+    addOpening,
+    addPiece,
+    addRoom,
+    movePiece,
+    moveRoom,
+    resizePiece,
+    remove,
+    select,
+    checkpoint,
+    setTool,
+  };
 
   useEffect(() => {
     const canvas = canvasRef.current;
@@ -95,6 +149,8 @@ export function FloorCanvas() {
         rooms,
         selected,
         catalogId,
+        unit,
+        wallKeep,
         pan: pan.current,
         zoom: zoom.current,
         drag: drag.current,
@@ -103,26 +159,70 @@ export function FloorCanvas() {
     };
     raf = requestAnimationFrame(loop);
     return () => cancelAnimationFrame(raf);
-  }, [walls, openings, pieces, rooms, selected, catalogId]);
+  }, [walls, openings, pieces, rooms, selected, catalogId, unit, wallKeep]);
 
   useEffect(() => {
     const canvas = canvasRef.current;
     if (!canvas) return;
 
+    const selectExisting = (p: { x: number; y: number }) => {
+      const s = live.current;
+      const sel = s.pieces.find((x) => x.id === s.selected);
+      if (sel) {
+        const handle = hitHandle(sel, p.x, p.y, 12);
+        if (handle) {
+          s.select(sel.id);
+          s.checkpoint();
+          drag.current = { kind: "resize", id: sel.id, handle };
+          return true;
+        }
+      }
+      const piece = hitTopPiece(s.pieces, p.x, p.y);
+      if (piece) {
+        s.select(piece.id);
+        s.checkpoint();
+        drag.current = { kind: "move", id: piece.id, dx: p.x - piece.x, dy: p.y - piece.y };
+        return true;
+      }
+      const opening = hitOpening(s.openings, s.walls, p.x, p.y);
+      if (opening) {
+        s.select(opening.id);
+        return true;
+      }
+      const room = hitRoom(s.rooms, p.x, p.y);
+      if (room) {
+        s.select(room.id);
+        s.checkpoint();
+        drag.current = { kind: "move-room", id: room.id, dx: p.x - room.x, dy: p.y - room.y };
+        return true;
+      }
+      const wall = hitWall(s.walls, p.x, p.y, 14);
+      if (wall) {
+        s.select(wall.id);
+        return true;
+      }
+      return false;
+    };
+
     const onDown = (e: PointerEvent) => {
       canvas.setPointerCapture(e.pointerId);
+      const s = live.current;
       const p = worldFromEvent(e, canvas, pan.current, zoom.current);
-      if (e.button === 1 || e.shiftKey || (tool === null && e.button === 2)) {
+      if (e.button === 1 || e.shiftKey || e.button === 2) {
         drag.current = { kind: "pan", x: e.clientX, y: e.clientY, sx: pan.current.x, sy: pan.current.y };
         return;
       }
-      if (tool === "wall") {
-        const j = snapToJoints(p.x, p.y, walls);
+      if (s.tool === "wall") {
+        const j = snapToJoints(p.x, p.y, s.walls);
         drag.current = { kind: "wall", x: j.x, y: j.y, sx: j.x, sy: j.y };
         return;
       }
-      if (tool === "furniture") {
-        const item = CATALOG.find((c) => c.id === catalogId) ?? CATALOG[0];
+      if (s.tool === "furniture") {
+        if (selectExisting(p)) {
+          s.setTool("select");
+          return;
+        }
+        const item = CATALOG.find((c) => c.id === s.catalogId) ?? CATALOG[0];
         if (isCustomItem(item.id)) {
           const x = snap(p.x);
           const y = snap(p.y);
@@ -130,7 +230,7 @@ export function FloorCanvas() {
           return;
         }
         if (isAlongWall(item.id)) {
-          const wall = hitWall(walls, p.x, p.y, 18);
+          const wall = hitWall(s.walls, p.x, p.y, 18);
           if (!wall) return;
           const t = projectT(wall, p.x, p.y);
           drag.current = {
@@ -142,42 +242,54 @@ export function FloorCanvas() {
           };
           return;
         }
-        addPiece(pieceFromCatalog(item, p.x, p.y));
+        s.addPiece(pieceFromCatalog(item, p.x, p.y));
         return;
       }
-      if (tool === "room") {
-        addRoom({ id: uid(), label: roomName || "Room", x: snap(p.x), y: snap(p.y) });
+      if (s.tool === "room") {
+        if (selectExisting(p)) {
+          s.setTool("select");
+          return;
+        }
+        s.addRoom({ id: uid(), label: s.roomName || "Room", x: snap(p.x), y: snap(p.y) });
         return;
       }
-      if (tool === "erase") {
-        const piece = hitTopPiece(pieces, p.x, p.y);
+      if (s.tool === "erase") {
+        const piece = hitTopPiece(s.pieces, p.x, p.y);
         if (piece) {
-          remove(piece.id);
+          s.remove(piece.id);
           return;
         }
-        const opening = hitOpening(openings, walls, p.x, p.y);
+        const opening = hitOpening(s.openings, s.walls, p.x, p.y);
         if (opening) {
-          remove(opening.id);
+          s.remove(opening.id);
           return;
         }
-        const room = hitRoom(rooms, p.x, p.y);
+        const room = hitRoom(s.rooms, p.x, p.y);
         if (room) {
-          remove(room.id);
+          s.remove(room.id);
           return;
         }
-        const wall = hitWall(walls, p.x, p.y);
-        if (wall) remove(wall.id);
+        const wall = hitWall(s.walls, p.x, p.y, 14);
+        if (wall) s.remove(wall.id);
         return;
       }
-      if (tool === "door" || tool === "window") {
-        const wall = hitWall(walls, p.x, p.y, 14);
+      if (s.tool === "door" || s.tool === "window") {
+        const piece = hitTopPiece(s.pieces, p.x, p.y);
+        if (piece) {
+          s.select(piece.id);
+          s.setTool("select");
+          s.checkpoint();
+          drag.current = { kind: "move", id: piece.id, dx: p.x - piece.x, dy: p.y - piece.y };
+          return;
+        }
+        const wall = hitWall(s.walls, p.x, p.y, 14);
         if (!wall) return;
-        const width = tool === "door" ? 32 : 48;
+        const width = s.tool === "door" ? 32 : 48;
         const placed = clampDoor(wall, projectT(wall, p.x, p.y), width);
-        addOpening({
+        s.addOpening({
           id: uid(),
           wallId: wall.id,
-          kind: tool,
+          kind: s.tool,
           offset: placed.offset,
           width: placed.width,
           hinge: "start",
@@ -185,40 +297,22 @@ export function FloorCanvas() {
         });
         return;
       }
-      const piece = hitTopPiece(pieces, p.x, p.y);
-      if (piece) {
-        select(piece.id);
-        checkpoint();
-        drag.current = { kind: "move", id: piece.id, dx: p.x - piece.x, dy: p.y - piece.y };
-        return;
-      }
-      const opening = hitOpening(openings, walls, p.x, p.y);
-      if (opening) {
-        select(opening.id);
-        return;
-      }
-      const room = hitRoom(rooms, p.x, p.y);
-      if (room) {
-        select(room.id);
-        checkpoint();
-        drag.current = { kind: "move-room", id: room.id, dx: p.x - room.x, dy: p.y - room.y };
-        return;
-      }
-      const wall = hitWall(walls, p.x, p.y);
-      select(wall?.id ?? null);
+      if (selectExisting(p)) return;
+      s.select(null);
       drag.current = { kind: "pan", x: e.clientX, y: e.clientY, sx: pan.current.x, sy: pan.current.y };
     };
 
     const onMove = (e: PointerEvent) => {
       const d = drag.current;
       if (!d) return;
+      const s = live.current;
       if (d.kind === "pan") {
         pan.current = { x: d.sx + (e.clientX - d.x), y: d.sy + (e.clientY - d.y) };
         return;
       }
       const p = worldFromEvent(e, canvas, pan.current, zoom.current);
       if (d.kind === "wall") {
-        const j = snapToJoints(p.x, p.y, walls);
+        const j = snapToJoints(p.x, p.y, s.walls);
         const dx = j.x - d.sx;
         const dy = j.y - d.sy;
         if (Math.abs(dx) >= Math.abs(dy)) {
@@ -236,35 +330,48 @@ export function FloorCanvas() {
         return;
       }
       if (d.kind === "builtin") {
-        const wall = walls.find((w) => w.id === d.wallId);
+        const wall = s.walls.find((w) => w.id === d.wallId);
         if (!wall) return;
         d.t1 = projectT(wall, p.x, p.y);
         d.side = sideOf(wall, p.x, p.y);
         return;
       }
       if (d.kind === "move") {
-        movePiece(d.id, snap(p.x - d.dx), snap(p.y - d.dy));
+        s.movePiece(d.id, snap(p.x - d.dx), snap(p.y - d.dy));
         return;
       }
       if (d.kind === "move-room") {
-        moveRoom(d.id, snap(p.x - d.dx), snap(p.y - d.dy));
+        s.moveRoom(d.id, snap(p.x - d.dx), snap(p.y - d.dy));
+        return;
+      }
+      if (d.kind === "resize") {
+        const piece = s.pieces.find((x) => x.id === d.id);
+        if (!piece) return;
+        s.resizePiece(d.id, resizeFromHandle(piece, d.handle, p.x, p.y));
       }
     };
 
     const onUp = () => {
       const d = drag.current;
+      const s = live.current;
       if (d?.kind === "wall") {
         const len = Math.hypot(d.x - d.sx, d.y - d.sy);
         if (len >= 12) {
-          addWall({ id: uid(), x1: d.sx, y1: d.sy, x2: d.x, y2: d.y });
+          s.addWall({ id: uid(), x1: d.sx, y1: d.sy, x2: d.x, y2: d.y });
+        } else {
+          const wall = hitWall(s.walls, d.sx, d.sy, 14);
+          if (wall) {
+            s.select(wall.id);
+            s.setTool("select");
+          }
         }
       }
       if (d?.kind === "custom") {
         const w = Math.abs(d.x - d.sx);
         const h = Math.abs(d.y - d.sy);
         if (w >= 12 && h >= 12) {
-          const item = CATALOG.find((c) => c.id === catalogId) ?? CATALOG[0];
-          addPiece({
+          const item = CATALOG.find((c) => c.id === s.catalogId) ?? CATALOG[0];
+          s.addPiece({
             id: uid(),
             kind: "furniture",
             shape: item.shape,
@@ -278,9 +385,9 @@ export function FloorCanvas() {
         }
       }
       if (d?.kind === "builtin") {
-        const wall = walls.find((w) => w.id === d.wallId);
-        const item = CATALOG.find((c) => c.id === catalogId) ?? CATALOG[0];
-        if (wall) addPiece(pieceFromBuiltin(wall, d.t0, d.t1, d.side, item));
+        const wall = s.walls.find((w) => w.id === d.wallId);
+        const item = CATALOG.find((c) => c.id === s.catalogId) ?? CATALOG[0];
+        if (wall) s.addPiece(pieceFromBuiltin(wall, d.t0, d.t1, d.side, item));
       }
       drag.current = null;
     };
@@ -314,29 +421,15 @@ export function FloorCanvas() {
       canvas.removeEventListener("wheel", onWheel);
       canvas.removeEventListener("contextmenu", onContext);
     };
-  }, [
-    tool,
-    catalogId,
-    roomName,
-    walls,
-    openings,
-    pieces,
-    rooms,
-    addWall,
-    addOpening,
-    addPiece,
-    addRoom,
-    movePiece,
-    moveRoom,
-    remove,
-    select,
-    checkpoint,
-  ]);
+  }, []);
 
   return (
     <canvas
       ref={canvasRef}
-      className={cn("h-[min(72vh,640px)] w-full touch-none bg-ink", tool ? "cursor-crosshair" : "cursor-grab")}
+      className={cn(
+        "h-[min(72vh,640px)] w-full touch-none bg-ink",
+        tool === "select" || tool === "erase" ? "cursor-pointer" : "cursor-crosshair",
+      )}
       aria-label="Floor plan"
     />
   );
@@ -363,12 +456,14 @@ function draw(
     rooms: RoomLabel[];
     selected: string | null;
     catalogId: string;
+    unit: Unit;
+    wallKeep: WallKeep;
     pan: { x: number; y: number };
     zoom: number;
     drag: Drag | null;
   },
 ) {
-  const { walls, openings, pieces, rooms, selected, catalogId, pan, zoom, drag } = state;
+  const { walls, openings, pieces, rooms, selected, catalogId, unit, wallKeep, pan, zoom, drag } = state;
   const s = PPI * zoom;
   const overlap = overlappingIds(pieces);
   ctx.clearRect(0, 0, w, h);
@@ -404,8 +499,11 @@ function draw(
   for (const room of rooms) drawRoom(ctx, room, s, room.id === selected);
 
   for (const piece of pieces) {
-    drawPiece(ctx, piece, s, piece.id === selected, overlap.has(piece.id));
+    drawPiece(ctx, piece, s, piece.id === selected, overlap.has(piece.id), unit);
   }
+  const selectedPiece = pieces.find((p) => p.id === selected);
+  if (selectedPiece) drawHandles(ctx, selectedPiece, s);
+
   if (drag?.kind === "custom") {
     const x = Math.min(drag.sx, drag.x) * s;
     const y = Math.min(drag.sy, drag.y) * s;
@@ -420,20 +518,26 @@ function draw(
     ctx.font = '10px "IBM Plex Mono", monospace';
     ctx.textAlign = "center";
     ctx.textBaseline = "top";
-    ctx.fillText(`${fmtIn(Math.abs(drag.x - drag.sx))} × ${fmtIn(Math.abs(drag.y - drag.sy))}`, x + ww / 2, y + hh + 6);
+    ctx.fillText(
+      `${formatDim(Math.abs(drag.x - drag.sx), unit)} × ${formatDim(Math.abs(drag.y - drag.sy), unit)}`,
+      x + ww / 2,
+      y + hh + 6,
+    );
   }
   if (drag?.kind === "builtin") {
     const wall = walls.find((wl) => wl.id === drag.wallId);
     const item = CATALOG.find((c) => c.id === catalogId);
     if (wall && item) {
       const preview = pieceFromBuiltin(wall, drag.t0, drag.t1, drag.side, item);
-      drawPiece(ctx, preview, s, true, false);
+      drawPiece(ctx, preview, s, true, false, unit);
     }
   }
 
   for (const wall of walls) {
-    drawWall(ctx, wall, openings.filter((o) => o.wallId === wall.id), s, wall.id === selected);
+    drawWall(ctx, wall, openings.filter((o) => o.wallId === wall.id), s, wall.id === selected, unit);
   }
+  const selectedWall = walls.find((w) => w.id === selected);
+  if (selectedWall) drawWallEnds(ctx, selectedWall, s, wallKeep);
   if (drag?.kind === "wall") {
     const len = Math.hypot(drag.x - drag.sx, drag.y - drag.sy);
     ctx.strokeStyle = "rgba(175,175,175,0.7)";
@@ -446,17 +550,18 @@ function draw(
     ctx.font = '11px "IBM Plex Mono", monospace';
     ctx.textAlign = "center";
     ctx.textBaseline = "middle";
-    ctx.fillText(fmtIn(len), ((drag.sx + drag.x) / 2) * s, ((drag.sy + drag.y) / 2) * s - 12);
+    ctx.fillText(formatDim(len, unit), ((drag.sx + drag.x) / 2) * s, ((drag.sy + drag.y) / 2) * s - 12);
   }
 
   ctx.restore();
 
-  drawScale(ctx, zoom);
+  drawScale(ctx, zoom, unit);
 }
 
-function drawScale(ctx: CanvasRenderingContext2D, zoom: number) {
-  const feet = 8;
-  const px = feet * 12 * PPI * zoom;
+function drawScale(ctx: CanvasRenderingContext2D, zoom: number, unit: Unit) {
+  const inches = unit === "metric" ? 200 / 2.54 : 96;
+  const label = unit === "metric" ? "2 m" : "8'";
+  const px = inches * PPI * zoom;
   const x = 16;
   const y = ctx.canvas.clientHeight - 18;
   ctx.strokeStyle = "#afafaf";
@@ -473,7 +578,7 @@ function drawScale(ctx: CanvasRenderingContext2D, zoom: number) {
   ctx.font = '10px "IBM Plex Mono", monospace';
   ctx.textAlign = "center";
   ctx.textBaseline = "bottom";
-  ctx.fillText(`${feet}'`, x + px / 2, y - 4);
+  ctx.fillText(label, x + px / 2, y - 4);
 }
 
 function drawRoom(ctx: CanvasRenderingContext2D, room: RoomLabel, s: number, on: boolean) {
@@ -484,12 +589,51 @@ function drawRoom(ctx: CanvasRenderingContext2D, room: RoomLabel, s: number, on:
   ctx.fillText(room.label, room.x * s, room.y * s);
 }
 
+function drawHandles(ctx: CanvasRenderingContext2D, piece: Piece, s: number) {
+  const size = Math.max(7, 6 * Math.min(s / 1.7, 1.6));
+  ctx.fillStyle = "#eceaea";
+  ctx.strokeStyle = "#b32440";
+  ctx.lineWidth = 1.5;
+  for (const h of pieceHandles(piece)) {
+    ctx.beginPath();
+    ctx.rect(h.x * s - size / 2, h.y * s - size / 2, size, size);
+    ctx.fill();
+    ctx.stroke();
+  }
+}
+
+function drawWallEnds(
+  ctx: CanvasRenderingContext2D,
+  wall: WallSeg,
+  s: number,
+  keep: WallKeep,
+) {
+  const mark = (x: number, y: number, kind: "a" | "b", on: boolean) => {
+    ctx.beginPath();
+    if (kind === "a") ctx.rect(x * s - 5, y * s - 5, 10, 10);
+    else ctx.arc(x * s, y * s, 6, 0, Math.PI * 2);
+    ctx.fillStyle = on ? "#b32440" : "#eceaea";
+    ctx.fill();
+    ctx.strokeStyle = "#0c0b0b";
+    ctx.lineWidth = 1;
+    ctx.stroke();
+    ctx.fillStyle = on ? "#eceaea" : "#0c0b0b";
+    ctx.font = '8px "IBM Plex Mono", monospace';
+    ctx.textAlign = "center";
+    ctx.textBaseline = "middle";
+    ctx.fillText(kind.toUpperCase(), x * s, y * s);
+  };
+  mark(wall.x1, wall.y1, "a", keep === "start");
+  mark(wall.x2, wall.y2, "b", keep === "end");
+}
+
 function drawWall(
   ctx: CanvasRenderingContext2D,
   wall: WallSeg,
   openings: Opening[],
   s: number,
   on: boolean,
+  unit: Unit,
 ) {
   const L = lengthIn(wall) || 1;
   const ux = (wall.x2 - wall.x1) / L;
@@ -498,8 +642,8 @@ function drawWall(
     .map((o) => ({ o, a: o.offset, b: o.offset + o.width }))
     .sort((a, b) => a.a - b.a);
   let cursor = 0;
-  ctx.strokeStyle = on ? "#eceaea" : "#afafaf";
-  ctx.lineWidth = Math.max(2, WALL_THICK * s);
+  ctx.strokeStyle = on ? "#b32440" : "#afafaf";
+  ctx.lineWidth = Math.max(2, WALL_THICK * s * (on ? 1.15 : 1));
   ctx.lineCap = "butt";
   const strokeSeg = (a: number, b: number) => {
     if (b - a < 1) return;
@@ -517,13 +661,13 @@ function drawWall(
   }
   strokeSeg(cursor, L);
 
-  ctx.fillStyle = "#8c8888";
+  ctx.fillStyle = on ? "#eceaea" : "#8c8888";
   ctx.font = '10px "IBM Plex Mono", monospace';
   ctx.textAlign = "center";
   ctx.textBaseline = "middle";
   const mx = ((wall.x1 + wall.x2) / 2) * s - uy * 12;
   const my = ((wall.y1 + wall.y2) / 2) * s + ux * 12;
-  ctx.fillText(fmtIn(L), mx, my);
+  ctx.fillText(formatDim(L, unit), mx, my);
 }
 
 function drawOpening(
@@ -585,7 +729,14 @@ function pathL(ctx: CanvasRenderingContext2D, w: number, h: number, s: number) {
   ctx.closePath();
 }
 
-function drawPiece(ctx: CanvasRenderingContext2D, piece: Piece, s: number, on: boolean, clash: boolean) {
+function drawPiece(
+  ctx: CanvasRenderingContext2D,
+  piece: Piece,
+  s: number,
+  on: boolean,
+  clash: boolean,
+  unit: Unit,
+) {
   ctx.save();
   ctx.translate(piece.x * s, piece.y * s);
   ctx.rotate((piece.rot * Math.PI) / 180);
@@ -620,6 +771,6 @@ function drawPiece(ctx: CanvasRenderingContext2D, piece: Piece, s: number, on: b
   ctx.fillText(piece.label, 0, -6, piece.w * s - 8);
   ctx.fillStyle = "#8c8888";
   ctx.font = '9px "IBM Plex Mono", monospace';
-  ctx.fillText(`${fmtIn(piece.w)} × ${fmtIn(piece.h)}`, 0, 10);
+  ctx.fillText(`${formatDim(piece.w, unit)} × ${formatDim(piece.h, unit)}`, 0, 10);
   ctx.restore();
 }
