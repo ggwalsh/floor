@@ -278,7 +278,7 @@ export const useFloor = create<Store>()(
     }),
     {
       name: "gw-floor",
-      version: 4,
+      version: 5,
       migrate: (persisted) => {
         const p = (persisted ?? {}) as Partial<Store>;
         return {

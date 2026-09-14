@@ -641,14 +641,16 @@ function drawWall(
   const cuts = openings
     .map((o) => ({ o, a: o.offset, b: o.offset + o.width }))
     .sort((a, b) => a.a - b.a);
+  const wallColor = on ? "#b32440" : "#afafaf";
+  const wallWidth = Math.max(2, WALL_THICK * s * (on ? 1.15 : 1));
   let cursor = 0;
-  ctx.strokeStyle = on ? "#b32440" : "#afafaf";
-  ctx.lineWidth = Math.max(2, WALL_THICK * s * (on ? 1.15 : 1));
-  ctx.lineCap = "butt";
   const strokeSeg = (a: number, b: number) => {
     if (b - a < 1) return;
     const p = along(wall, a);
     const q = along(wall, b);
+    ctx.strokeStyle = wallColor;
+    ctx.lineWidth = wallWidth;
+    ctx.lineCap = "butt";
     ctx.beginPath();
     ctx.moveTo(p.x * s, p.y * s);
     ctx.lineTo(q.x * s, q.y * s);
@@ -679,40 +681,42 @@ function drawOpening(
   s: number,
   on: boolean,
 ) {
+  ctx.save();
+  ctx.lineCap = "butt";
   const a = along(wall, o.offset);
   const b = along(wall, o.offset + o.width);
-  ctx.strokeStyle = on ? "#b32440" : "#8a1a30";
-  ctx.lineWidth = o.kind === "window" ? 3 : 2;
-  ctx.beginPath();
-  ctx.moveTo(a.x * s, a.y * s);
-  ctx.lineTo(b.x * s, b.y * s);
-  ctx.stroke();
+  const nx = -uy;
+  const ny = ux;
+  const half = WALL_THICK / 2;
   if (o.kind === "window") {
-    ctx.strokeStyle = "#afafaf";
-    ctx.lineWidth = 1;
-    const nx = -uy;
-    const ny = ux;
-    ctx.beginPath();
-    ctx.moveTo((a.x + nx * 2) * s, (a.y + ny * 2) * s);
-    ctx.lineTo((b.x + nx * 2) * s, (b.y + ny * 2) * s);
-    ctx.stroke();
+    ctx.strokeStyle = on ? "#eceaea" : "#afafaf";
+    ctx.lineWidth = Math.max(1.2, s * 0.65);
+    for (const d of [-half, half]) {
+      ctx.beginPath();
+      ctx.moveTo((a.x + nx * d) * s, (a.y + ny * d) * s);
+      ctx.lineTo((b.x + nx * d) * s, (b.y + ny * d) * s);
+      ctx.stroke();
+    }
+    ctx.restore();
     return;
   }
   const hinge = o.hinge === "start" ? a : b;
-  const nx = -uy * o.side;
-  const ny = ux * o.side;
+  const sx = nx * o.side;
+  const sy = ny * o.side;
   const closed = o.hinge === "start" ? { x: ux, y: uy } : { x: -ux, y: -uy };
   const startAng = Math.atan2(closed.y, closed.x);
   const sweep = (Math.PI / 2) * o.side * (o.hinge === "start" ? 1 : -1);
-  ctx.strokeStyle = "rgba(179,36,64,0.75)";
+  ctx.strokeStyle = on ? "rgba(179,36,64,0.9)" : "rgba(179,36,64,0.75)";
   ctx.lineWidth = 1.2;
   ctx.beginPath();
   ctx.arc(hinge.x * s, hinge.y * s, o.width * s, startAng, startAng + sweep, sweep < 0);
   ctx.stroke();
+  ctx.lineWidth = 1.6;
   ctx.beginPath();
   ctx.moveTo(hinge.x * s, hinge.y * s);
-  ctx.lineTo((hinge.x + nx * o.width) * s, (hinge.y + ny * o.width) * s);
+  ctx.lineTo((hinge.x + sx * o.width) * s, (hinge.y + sy * o.width) * s);
   ctx.stroke();
+  ctx.restore();
 }
 
 function pathL(ctx: CanvasRenderingContext2D, w: number, h: number, s: number) {

@@ -2,7 +2,9 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import {
   CATALOG,
+  SAMPLE_OPENINGS,
   SAMPLE_PIECES,
+  SAMPLE_ROOMS,
   SAMPLE_WALLS,
   aabb,
   aabbsOverlap,
@@ -193,7 +195,7 @@ test("aabb overlap", () => {
 });
 
 test("sample pieces stay inside the outer walls", () => {
-  const outer = { x1: 1, y1: 1, x2: 239, y2: 167 };
+  const outer = { x1: 1, y1: 1, x2: 167, y2: 143 };
   for (const p of SAMPLE_PIECES) {
     const box = aabb(p);
     assert.ok(box.x1 >= outer.x1 - 0.5, `${p.label} x1 ${box.x1}`);
@@ -204,7 +206,7 @@ test("sample pieces stay inside the outer walls", () => {
   const ids = overlappingIds(SAMPLE_PIECES);
   assert.equal(ids.size, 0, `overlaps: ${[...ids].join(",")}`);
   const west = SAMPLE_WALLS.find((w) => w.id === "w")!;
-  assert.equal(lengthIn(west), 168);
+  assert.equal(lengthIn(west), 144);
 });
 
 test("sample pieces sit on a wall", () => {
@@ -213,22 +215,28 @@ test("sample pieces sit on a wall", () => {
     const box = aabb(p);
     const on =
       Math.abs(box.y1 - inner) < 2.6 ||
-      Math.abs(box.y2 - (168 - inner)) < 2.6 ||
+      Math.abs(box.y2 - (144 - inner)) < 2.6 ||
       Math.abs(box.x1 - inner) < 2.6 ||
-      Math.abs(box.x2 - (240 - inner)) < 2.6 ||
-      Math.abs(box.x2 - (192 - inner)) < 2.6 ||
-      Math.abs(box.x1 - (192 + inner)) < 2.6 ||
-      Math.abs(box.y1 - (96 + inner)) < 2.6;
+      Math.abs(box.x2 - (168 - inner)) < 2.6;
     assert.ok(on, `${p.label} not on a wall ${JSON.stringify(box)}`);
   }
+});
+
+test("sample is a bedroom off a hall", () => {
+  assert.equal(SAMPLE_OPENINGS.filter((o) => o.kind === "door").length, 1);
+  assert.equal(SAMPLE_OPENINGS.filter((o) => o.kind === "window").length, 1);
+  assert.ok(SAMPLE_WALLS.some((w) => w.id === "hs"));
+  assert.ok(SAMPLE_ROOMS.some((r) => r.label === "Bedroom"));
+  assert.ok(SAMPLE_ROOMS.some((r) => r.label === "Hall"));
 });
 
 test("wallCaption names the envelope", () => {
   assert.equal(wallCaption(SAMPLE_WALLS[0], SAMPLE_WALLS), "North wall");
   assert.equal(wallCaption(SAMPLE_WALLS[1], SAMPLE_WALLS), "East wall");
-  assert.equal(wallCaption(SAMPLE_WALLS[2], SAMPLE_WALLS), "South wall");
+  assert.equal(wallCaption(SAMPLE_WALLS[2], SAMPLE_WALLS), "Partition");
   assert.equal(wallCaption(SAMPLE_WALLS[3], SAMPLE_WALLS), "West wall");
-  assert.equal(wallCaption(SAMPLE_WALLS[4], SAMPLE_WALLS), "Partition");
+  const hallSouth = SAMPLE_WALLS.find((w) => w.id === "hs")!;
+  assert.equal(wallCaption(hallSouth, SAMPLE_WALLS), "South wall");
 });
 
 test("plan json roundtrip", () => {

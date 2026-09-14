@@ -587,35 +587,27 @@ function W(id: string, x1: number, y1: number, x2: number, y2: number): WallSeg 
 }
 
 export const SAMPLE_WALLS: WallSeg[] = [
-  W("n", 0, 0, 240, 0),
-  W("e", 240, 0, 240, 168),
-  W("s", 240, 168, 0, 168),
-  W("w", 0, 168, 0, 0),
-  W("bath", 192, 0, 192, 96),
-  W("kit", 192, 96, 240, 96),
+  W("n", 0, 0, 168, 0),
+  W("e", 168, 0, 168, 144),
+  W("s", 168, 144, 0, 144),
+  W("w", 0, 144, 0, 0),
+  W("hw", 104, 144, 104, 240),
+  W("hs", 104, 240, 152, 240),
+  W("he", 152, 240, 152, 144),
 ];
 
 export const SAMPLE_OPENINGS: Opening[] = [
-  { id: "entry", wallId: "s", kind: "door", offset: 164, width: 36, hinge: "end", side: 1 },
-  { id: "bathd", wallId: "bath", kind: "door", offset: 60, width: 24, hinge: "start", side: 1 },
-  { id: "win1", wallId: "n", kind: "window", offset: 36, width: 48, hinge: "start", side: 1 },
-  { id: "win2", wallId: "s", kind: "window", offset: 12, width: 36, hinge: "start", side: 1 },
+  { id: "entry", wallId: "s", kind: "door", offset: 24, width: 32, hinge: "start", side: 1 },
+  { id: "win1", wallId: "n", kind: "window", offset: 72, width: 48, hinge: "start", side: 1 },
 ];
 
 export const SAMPLE_PIECES: Piece[] = [
   { id: "bed", kind: "furniture", shape: "rect", label: "Queen bed", x: 32, y: 42, w: 60, h: 80, rot: 0 },
   { id: "ns", kind: "furniture", shape: "rect", label: "Nightstand", x: 72, y: 11, w: 20, h: 18, rot: 0 },
-  { id: "desk", kind: "furniture", shape: "rect", label: "Desk", x: 118, y: 17, w: 60, h: 30, rot: 0 },
-  { id: "ward", kind: "wardrobe", shape: "rect", label: "Built-in", x: 14, y: 130, w: 72, h: 24, rot: 90 },
-  { id: "sofa", kind: "furniture", shape: "rect", label: "Sofa", x: 132, y: 148, w: 84, h: 36, rot: 0 },
-  { id: "fr", kind: "furniture", shape: "rect", label: "Fridge", x: 222, y: 113, w: 32, h: 30, rot: 0 },
-  { id: "van", kind: "furniture", shape: "rect", label: "Vanity", x: 212, y: 12.5, w: 36, h: 21, rot: 0 },
-  { id: "wc", kind: "furniture", shape: "rect", label: "Toilet", x: 224, y: 39, w: 28, h: 18, rot: 0 },
+  { id: "ward", kind: "wardrobe", shape: "rect", label: "Wardrobe", x: 154, y: 60, w: 72, h: 24, rot: 90 },
 ];
 
 export const SAMPLE_ROOMS: RoomLabel[] = [
-  { id: "r-bed", label: "Bedroom", x: 100, y: 50 },
-  { id: "r-liv", label: "Living", x: 100, y: 118 },
-  { id: "r-bath", label: "Bath", x: 216, y: 78 },
-  { id: "r-kit", label: "Kitchen", x: 216, y: 142 },
+  { id: "r-bed", label: "Bedroom", x: 84, y: 92 },
+  { id: "r-hall", label: "Hall", x: 128, y: 192 },
 ];
